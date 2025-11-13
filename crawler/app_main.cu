@@ -56,13 +56,8 @@ int main(int argc, char** argv) {
         if (settings.selfTest) {
             // Send a single metric and print response behavior (HTTP sender prints errors/status)
             std::string host = "host";
-#ifdef _WIN32
             char buf[256];
             if (gethostname(buf, sizeof(buf)) == 0) host = buf;
-#else
-            char buf[256];
-            if (gethostname(buf, sizeof(buf)) == 0) host = buf;
-#endif
             std::string sample = buildSelfTestSampleJson(host);
             sender->send(sample);
             std::cout << "[OK] Self-test request sent." << std::endl;
