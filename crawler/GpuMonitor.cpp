@@ -1,5 +1,6 @@
 #include "GpuMonitor.h"
 #include "Utils.h"
+#include "NvidiaSmiHelper.h"
 #include <iostream>
 #include <sstream>
 #include <thread>
@@ -184,7 +185,7 @@ static void collectSampleForIndex(unsigned int i, nvmlDevice_t device,
                                   const char* uuid, const char* deviceName,
                                   std::map<std::string, GpuMetrics>& gpuMetrics,
                                   std::map<std::string, std::map<unsigned int, ProcessMetrics>>& processMetrics) {
-    // Get running processes on this GPU
+    // Get running processes on this GPU via NVML
     unsigned int infoCount = 0;
     std::vector<nvmlProcessInfo_t> processes;
 
@@ -217,6 +218,14 @@ static void collectSampleForIndex(unsigned int i, nvmlDevice_t device,
                 }
             }
         }
+    }
+
+    // Query per-process memory via nvidia-smi (workaround for Windows WDDM)
+    // Build a map: PID -> memory usage (MiB) for fast lookup
+    std::map<unsigned int, uint64_t> smiMemoryMap;
+    std::vector<SmiProcessInfo> smiProcesses = queryProcessMemoryViaSmi(i);
+    for (const auto& smiProc : smiProcesses) {
+        smiMemoryMap[smiProc.pid] = smiProc.usedMemoryMiB;
     }
 
     // Collect GPU-level metrics
@@ -262,12 +271,26 @@ static void collectSampleForIndex(unsigned int i, nvmlDevice_t device,
             procMetric.pid = proc.pid;
         }
 
-        // Check for invalid memory value (NVML returns ULLONG_MAX when not available)
+        // Determine per-process memory usage:
+        // 1. Try NVML first (works on Linux/TCC mode)
+        // 2. Fall back to nvidia-smi data (Windows WDDM workaround)
+        // 3. Default to 0 if neither is available
         uint64_t memMiB = 0;
-        std::cout << "usedGpu" << proc.usedGpuMemory << std::endl;
+
+        // Check if NVML provides valid memory data
         if (proc.usedGpuMemory != ULLONG_MAX && proc.usedGpuMemory != 0xFFFFFFFFFFFFFFFFULL) {
             memMiB = proc.usedGpuMemory / (1024 * 1024);
+        } else {
+            // NVML memory not available (Windows WDDM), use nvidia-smi data
+            auto it = smiMemoryMap.find(proc.pid);
+            if (it != smiMemoryMap.end()) {
+                memMiB = it->second;
+            } else {
+                // Process not found in nvidia-smi output, use 0
+                memMiB = 0;
+            }
         }
+
         procMetric.addSample(memMiB);
     }
 }
