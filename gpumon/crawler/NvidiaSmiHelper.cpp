@@ -89,8 +89,7 @@ std::vector<SmiProcessInfo> queryProcessMemoryViaSmi(unsigned int deviceIndex) {
             inProcessBlock = true;
 
             // Extract PID
-            size_t colonPos = line.find(':');
-            if (colonPos != std::string::npos) {
+            if (size_t colonPos = line.find(':'); colonPos != std::string::npos) {
                 std::string pidStr = line.substr(colonPos + 1);
                 trim(pidStr);
                 try {
@@ -99,8 +98,7 @@ std::vector<SmiProcessInfo> queryProcessMemoryViaSmi(unsigned int deviceIndex) {
             }
         }
         else if (inProcessBlock && line.find("Process Name") != std::string::npos) {
-            size_t colonPos = line.find(':');
-            if (colonPos != std::string::npos) {
+            if (size_t colonPos = line.find(':'); colonPos != std::string::npos) {
                 std::string procName = line.substr(colonPos + 1);
                 trim(procName);
                 currentProcess.processName = procName;
@@ -132,7 +130,6 @@ std::vector<SmiProcessInfo> queryProcessMemoryViaSmi(unsigned int deviceIndex) {
         }
     }
 
-    // Don't forget the last process
     if (inProcessBlock && currentProcess.pid != 0 && currentProcess.usedMemoryMiB > 0) {
         result.push_back(currentProcess);
         validEntries++;

@@ -1,6 +1,7 @@
 #include "GpuMonitor.h"
 #include "Utils.h"
 #include "NvidiaSmiHelper.h"
+#include "ClientLogReader.h"
 #include <iostream>
 #include <sstream>
 #include <thread>
@@ -10,6 +11,7 @@
 #include <map>
 #include <numeric>
 #include <climits>
+#include <filesystem>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -142,6 +144,56 @@ static std::string buildGpuMetricJson(const std::string& ts,
     return result;
 }
 
+// Structure to hold enriched process data from clientlib
+struct EnrichedProcessData {
+    std::string appName;
+    std::string kernelName;
+    std::string regionName;
+    std::string scopeName;
+    std::string tag;
+};
+
+// Helper: find matching clientlib events for a PID within timestamp range
+static EnrichedProcessData getEnrichedDataForProcess(
+    const std::vector<std::unique_ptr<ClientLogReader>>& logReaders,
+    unsigned int pid,
+    int64_t startNs,
+    int64_t endNs)
+{
+    EnrichedProcessData enriched;
+
+    for (const auto& reader : logReaders) {
+        if (!reader || !reader->isValid()) continue;
+
+        auto events = reader->getEventsForPid(static_cast<int32_t>(pid), startNs, endNs);
+
+        // Aggregate data from events
+        for (const auto& event : events) {
+            if (!event.appName.empty() && enriched.appName.empty()) {
+                enriched.appName = event.appName;
+            }
+            if (!event.kernelName.empty()) {
+                if (!enriched.kernelName.empty()) enriched.kernelName += ",";
+                enriched.kernelName += event.kernelName;
+            }
+            if (!event.regionName.empty() && enriched.regionName.empty()) {
+                enriched.regionName = event.regionName;
+            }
+            if (!event.scopeName.empty() && enriched.scopeName.empty()) {
+                enriched.scopeName = event.scopeName;
+            }
+            if (!event.tag.empty() && enriched.tag.empty()) {
+                enriched.tag = event.tag;
+            }
+        }
+
+        // If we found data, no need to check other log files
+        if (!enriched.appName.empty()) break;
+    }
+
+    return enriched;
+}
+
 // Build process-level metrics JSON
 static std::string buildProcessMetricJson(const std::string& ts,
                                           const std::string& hostname,
@@ -149,7 +201,8 @@ static std::string buildProcessMetricJson(const std::string& ts,
                                           const std::string& gpuName,
                                           unsigned int pid,
                                           const std::string& processName,
-                                          const ProcessMetrics& metrics) {
+                                          const ProcessMetrics& metrics,
+                                          const EnrichedProcessData& enriched = {}) {
     std::ostringstream j;
     j << "{\"timestamp\":\"" << ts << "\","
       << "\"hostname\":\"" << hostname << "\","
@@ -161,6 +214,24 @@ static std::string buildProcessMetricJson(const std::string& ts,
     j << ",\"pid\":" << pid
       << ",\"processName\":\"" << processName << "\"";
     j << ",\"processUsedMemoryMiB\":" << average(metrics.usedMemoryMiB);
+
+    // Add enriched data from clientlib if available
+    if (!enriched.appName.empty()) {
+        j << ",\"appName\":\"" << enriched.appName << "\"";
+    }
+    if (!enriched.kernelName.empty()) {
+        j << ",\"kernelName\":\"" << enriched.kernelName << "\"";
+    }
+    if (!enriched.regionName.empty()) {
+        j << ",\"regionName\":\"" << enriched.regionName << "\"";
+    }
+    if (!enriched.scopeName.empty()) {
+        j << ",\"scopeName\":\"" << enriched.scopeName << "\"";
+    }
+    if (!enriched.tag.empty()) {
+        j << ",\"tag\":\"" << enriched.tag << "\"";
+    }
+
     j << '}';
 
     // Debug output
@@ -170,7 +241,8 @@ static std::string buildProcessMetricJson(const std::string& ts,
     return result;
 }
 
-GpuMonitor::GpuMonitor(std::unique_ptr<IMetricsSender> sender): sender_(std::move(sender)) {
+GpuMonitor::GpuMonitor(std::unique_ptr<IMetricsSender> sender, const std::vector<std::string>& clientLogPaths)
+    : sender_(std::move(sender)), clientLogPaths_(clientLogPaths) {
 #ifdef _WIN32
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
@@ -342,6 +414,18 @@ void GpuMonitor::runLoop() const {
     static constexpr unsigned int kMinNvmlSampleIntervalMs = 100u;
     const auto actualSampleIntervalMs = max(sampleIntervalMs, kMinNvmlSampleIntervalMs);
 
+    // 2.5. Initialize client log readers if log paths are provided
+    std::vector<std::unique_ptr<ClientLogReader>> logReaders;
+    for (const auto& logPath : clientLogPaths_) {
+        auto reader = std::make_unique<ClientLogReader>(logPath);
+        if (reader->isValid()) {
+            std::cout << "Initialized log reader for: " << logPath << std::endl;
+            logReaders.push_back(std::move(reader));
+        } else {
+            std::cout << "Warning: Could not open log file: " << logPath << std::endl;
+        }
+    }
+
     // 3. Start the monitoring loop with sampling and aggregation
     uint32_t iter = 0;
     while (!isStopRequested()) {
@@ -417,13 +501,32 @@ void GpuMonitor::runLoop() const {
                 const unsigned int pid = procEntry.first;
                 const ProcessMetrics& metrics = procEntry.second;
 
+                // Get enriched data from clientlib logs if available
+                // Use a reasonable time window around the aggregation interval
+                auto now = std::chrono::steady_clock::now();
+                int64_t endNs = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+                int64_t startNs = endNs - (aggregationIntervalMs * 1000000LL); // Convert ms to ns
+
+                EnrichedProcessData enriched = getEnrichedDataForProcess(logReaders, pid, startNs, endNs);
+
                 std::cout << "  Process on " << gpuName << ": PID=" << pid
                           << ", Name=" << metrics.processName
-                          << ", Samples: " << metrics.usedMemoryMiB.size() << std::endl;
+                          << ", Samples: " << metrics.usedMemoryMiB.size();
+
+                if (!enriched.appName.empty()) {
+                    std::cout << ", App=" << enriched.appName;
+                }
+                if (!enriched.kernelName.empty()) {
+                    std::cout << ", Kernel=" << enriched.kernelName;
+                }
+                if (!enriched.tag.empty()) {
+                    std::cout << ", Tag=" << enriched.tag;
+                }
+                std::cout << std::endl;
 
                 sender_->send(buildProcessMetricJson(
                     aggregationTimestamp, hostname_, gpuUuid, gpuName,
-                    pid, metrics.processName, metrics
+                    pid, metrics.processName, metrics, enriched
                 ));
             }
         }

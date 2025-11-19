@@ -1,12 +1,12 @@
 cmake_minimum_required(VERSION 3.30)
-project(crawler LANGUAGES CUDA CXX)
+project(. LANGUAGES CUDA CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
 
 add_executable(crawler app_main.cu MetricsSender.cpp GpuMonitor.cpp Config.cpp
-        NvidiaSmiHelper.cpp)
+        NvidiaSmiHelper.cpp ClientLogReader.cpp)
 
 find_library(NVML_LIBRARY
         NAMES nvml

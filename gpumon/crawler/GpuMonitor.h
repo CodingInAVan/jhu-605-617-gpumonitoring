@@ -3,6 +3,7 @@
 #include <memory>
 #include <stdexcept>
 #include <atomic>
+#include <vector>
 #include <nvml.h>
 #include "MetricsSender.h"
 
@@ -14,7 +15,7 @@ inline void checkNvmlError(nvmlReturn_t result, const std::string &functionName)
 
 class GpuMonitor {
 public:
-    explicit GpuMonitor(std::unique_ptr<IMetricsSender> sender);
+    explicit GpuMonitor(std::unique_ptr<IMetricsSender> sender, const std::vector<std::string>& clientLogPaths = {});
     ~GpuMonitor() = default;
 
     void runLoop() const;
@@ -27,4 +28,5 @@ private:
     static std::atomic<bool> stop_;
     std::unique_ptr<IMetricsSender> sender_;
     std::string hostname_;
+    std::vector<std::string> clientLogPaths_;
 };
