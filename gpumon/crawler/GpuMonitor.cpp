@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <vector>
 #include <map>
+#include <set>
 #include <numeric>
 #include <climits>
 #include <filesystem>
@@ -151,45 +152,103 @@ struct EnrichedProcessData {
     std::string regionName;
     std::string scopeName;
     std::string tag;
+    int64_t scopeMemDeltaMiB = 0;  // Memory allocated/freed during scope
+    int64_t scopeMemUsedMiB = 0;   // Memory used at end of scope
+    bool hasMemoryData = false;
 };
 
-// Helper: find matching clientlib events for a PID within timestamp range
-static EnrichedProcessData getEnrichedDataForProcess(
+// Helper: get all process events from all log readers within timestamp range
+static std::map<int32_t, std::vector<ClientEvent>> getAllProcessEventsFromReaders(
     const std::vector<std::unique_ptr<ClientLogReader>>& logReaders,
-    unsigned int pid,
     int64_t startNs,
     int64_t endNs)
 {
-    EnrichedProcessData enriched;
+    std::map<int32_t, std::vector<ClientEvent>> allProcessEvents;
 
-    for (const auto& reader : logReaders) {
-        if (!reader || !reader->isValid()) continue;
+    std::cout << "[getAllProcessEventsFromReaders] Collecting events from " << logReaders.size()
+              << " log readers, time range: " << startNs << " to " << endNs << std::endl;
 
-        auto events = reader->getEventsForPid(static_cast<int32_t>(pid), startNs, endNs);
-
-        // Aggregate data from events
-        for (const auto& event : events) {
-            if (!event.appName.empty() && enriched.appName.empty()) {
-                enriched.appName = event.appName;
-            }
-            if (!event.kernelName.empty()) {
-                if (!enriched.kernelName.empty()) enriched.kernelName += ",";
-                enriched.kernelName += event.kernelName;
-            }
-            if (!event.regionName.empty() && enriched.regionName.empty()) {
-                enriched.regionName = event.regionName;
-            }
-            if (!event.scopeName.empty() && enriched.scopeName.empty()) {
-                enriched.scopeName = event.scopeName;
-            }
-            if (!event.tag.empty() && enriched.tag.empty()) {
-                enriched.tag = event.tag;
-            }
+    for (size_t i = 0; i < logReaders.size(); ++i) {
+        const auto& reader = logReaders[i];
+        if (!reader || !reader->isValid()) {
+            std::cout << "[getAllProcessEventsFromReaders] Skipping invalid reader " << i << std::endl;
+            continue;
         }
 
-        // If we found data, no need to check other log files
-        if (!enriched.appName.empty()) break;
+        auto readerEvents = reader->getAllProcessEvents(startNs, endNs);
+        std::cout << "[getAllProcessEventsFromReaders] Reader " << i
+                  << " found events for " << readerEvents.size() << " processes" << std::endl;
+
+        // Merge events from this reader into the combined map
+        for (auto& [pid, events] : readerEvents) {
+            allProcessEvents[pid].insert(
+                allProcessEvents[pid].end(),
+                std::make_move_iterator(events.begin()),
+                std::make_move_iterator(events.end())
+            );
+        }
     }
+
+    std::cout << "[getAllProcessEventsFromReaders] Total: " << allProcessEvents.size()
+              << " processes with events" << std::endl;
+
+    return allProcessEvents;
+}
+
+// Helper: enrich process data from clientlib events
+static EnrichedProcessData enrichProcessData(const std::vector<ClientEvent>& events, unsigned int pid)
+{
+    std::cout << "[enrichProcessData] Processing " << events.size() << " events for PID=" << pid << std::endl;
+
+    EnrichedProcessData enriched;
+
+    // Aggregate data from events
+    for (const auto& event : events) {
+        std::cout << "[enrichProcessData] Processing event: type=" << event.type;
+        if (!event.appName.empty()) std::cout << ", app=" << event.appName;
+        if (!event.kernelName.empty()) std::cout << ", kernel=" << event.kernelName;
+        if (!event.scopeName.empty()) std::cout << ", scope=" << event.scopeName;
+        if (!event.tag.empty()) std::cout << ", tag=" << event.tag;
+        if (event.memDeltaMiB != 0) std::cout << ", memDelta=" << event.memDeltaMiB << "MiB";
+        std::cout << std::endl;
+
+        if (!event.appName.empty() && enriched.appName.empty()) {
+            enriched.appName = event.appName;
+        }
+        if (!event.kernelName.empty()) {
+            if (!enriched.kernelName.empty()) enriched.kernelName += ",";
+            enriched.kernelName += event.kernelName;
+        }
+        if (!event.regionName.empty() && enriched.regionName.empty()) {
+            enriched.regionName = event.regionName;
+        }
+        if (!event.scopeName.empty() && enriched.scopeName.empty()) {
+            enriched.scopeName = event.scopeName;
+        }
+        if (!event.tag.empty() && enriched.tag.empty()) {
+            enriched.tag = event.tag;
+        }
+        // Collect memory data from scope_end events
+        if (event.type == "scope_end") {
+            if (event.memDeltaMiB != 0) {
+                enriched.scopeMemDeltaMiB += event.memDeltaMiB;
+            }
+            // Also capture the absolute memory usage at scope end
+            if (event.memEndUsedMiB > 0) {
+                enriched.scopeMemUsedMiB = event.memEndUsedMiB;
+                enriched.hasMemoryData = true;
+            }
+        }
+    }
+
+    std::cout << "[enrichProcessData] Summary for PID " << pid
+              << ": appName=" << (enriched.appName.empty() ? "(none)" : enriched.appName)
+              << ", kernels=" << (enriched.kernelName.empty() ? "(none)" : enriched.kernelName)
+              << ", scope=" << (enriched.scopeName.empty() ? "(none)" : enriched.scopeName)
+              << ", tag=" << (enriched.tag.empty() ? "(none)" : enriched.tag)
+              << ", memDelta=" << enriched.scopeMemDeltaMiB << " MiB"
+              << ", memUsed=" << enriched.scopeMemUsedMiB << " MiB"
+              << std::endl;
 
     return enriched;
 }
@@ -230,6 +289,14 @@ static std::string buildProcessMetricJson(const std::string& ts,
     }
     if (!enriched.tag.empty()) {
         j << ",\"tag\":\"" << enriched.tag << "\"";
+    }
+    if (enriched.hasMemoryData) {
+        if (enriched.scopeMemDeltaMiB != 0) {
+            j << ",\"scopeMemDeltaMiB\":" << enriched.scopeMemDeltaMiB;
+        }
+        if (enriched.scopeMemUsedMiB > 0) {
+            j << ",\"scopeMemUsedMiB\":" << enriched.scopeMemUsedMiB;
+        }
     }
 
     j << '}';
@@ -292,14 +359,6 @@ static void collectSampleForIndex(unsigned int i, nvmlDevice_t device,
         }
     }
 
-    // Query per-process memory via nvidia-smi (workaround for Windows WDDM)
-    // Build a map: PID -> memory usage (MiB) for fast lookup
-    std::map<unsigned int, uint64_t> smiMemoryMap;
-    std::vector<SmiProcessInfo> smiProcesses = queryProcessMemoryViaSmi(i);
-    for (const auto& smiProc : smiProcesses) {
-        smiMemoryMap[smiProc.pid] = smiProc.usedMemoryMiB;
-    }
-
     // Collect GPU-level metrics
     nvmlMemory_t memoryInfo{};
     nvmlDeviceGetMemoryInfo(device, &memoryInfo);
@@ -353,14 +412,7 @@ static void collectSampleForIndex(unsigned int i, nvmlDevice_t device,
         if (proc.usedGpuMemory != ULLONG_MAX && proc.usedGpuMemory != 0xFFFFFFFFFFFFFFFFULL) {
             memMiB = proc.usedGpuMemory / (1024 * 1024);
         } else {
-            // NVML memory not available (Windows WDDM), use nvidia-smi data
-            auto it = smiMemoryMap.find(proc.pid);
-            if (it != smiMemoryMap.end()) {
-                memMiB = it->second;
-            } else {
-                // Process not found in nvidia-smi output, use 0
-                memMiB = 0;
-            }
+            memMiB = 0;
         }
 
         procMetric.addSample(memMiB);
@@ -434,6 +486,15 @@ void GpuMonitor::runLoop() const {
         // Map: GPU UUID -> PID -> ProcessMetrics
         std::map<std::string, std::map<unsigned int, ProcessMetrics>> processMetrics;
 
+        // Read new events from all log files into cache
+        for (auto& reader : logReaders) {
+            size_t newEvents = reader->readNewEvents();
+            if (newEvents > 0) {
+                std::cout << "[ClientLog] Read " << newEvents << " new events. Total cached: "
+                          << reader->getCachedEventCount() << std::endl;
+            }
+        }
+
         // Collect samples over the aggregation interval
         const auto aggregationStart = std::chrono::steady_clock::now();
         const std::string aggregationTimestamp = nowIso8601Utc();
@@ -483,10 +544,21 @@ void GpuMonitor::runLoop() const {
             ));
         }
 
-        // Send process-level metrics (one per process)
-        for (const auto& gpuEntry : processMetrics) {
-            const std::string& gpuUuid = gpuEntry.first;
-            const auto& processMap = gpuEntry.second;
+        // Get all process events from clientlib logs for this time window
+        auto now = std::chrono::steady_clock::now();
+        int64_t endNs = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+        int64_t startNs = endNs - (aggregationIntervalMs * 1000000LL); // Convert ms to ns
+
+        std::map<int32_t, std::vector<ClientEvent>> allProcessEvents =
+            getAllProcessEventsFromReaders(logReaders, startNs, endNs);
+
+        // Track which PIDs from logs we've already processed with NVML data
+        std::set<int32_t> processedPids;
+
+        // Send process-level metrics (one per process) - NVML processes with enrichment
+        for (const auto&[fst, snd] : processMetrics) {
+            const std::string& gpuUuid = fst;
+            const auto& processMap = snd;
 
             // Find device name for this GPU
             std::string gpuName = "unknown";
@@ -501,13 +573,13 @@ void GpuMonitor::runLoop() const {
                 const unsigned int pid = procEntry.first;
                 const ProcessMetrics& metrics = procEntry.second;
 
-                // Get enriched data from clientlib logs if available
-                // Use a reasonable time window around the aggregation interval
-                auto now = std::chrono::steady_clock::now();
-                int64_t endNs = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
-                int64_t startNs = endNs - (aggregationIntervalMs * 1000000LL); // Convert ms to ns
-
-                EnrichedProcessData enriched = getEnrichedDataForProcess(logReaders, pid, startNs, endNs);
+                // Enrich this process with clientlib events (if available)
+                EnrichedProcessData enriched;
+                auto eventIt = allProcessEvents.find(static_cast<int32_t>(pid));
+                if (eventIt != allProcessEvents.end()) {
+                    enriched = enrichProcessData(eventIt->second, pid);
+                    processedPids.insert(static_cast<int32_t>(pid));
+                }
 
                 std::cout << "  Process on " << gpuName << ": PID=" << pid
                           << ", Name=" << metrics.processName
@@ -529,6 +601,38 @@ void GpuMonitor::runLoop() const {
                     pid, metrics.processName, metrics, enriched
                 ));
             }
+        }
+
+        // Send metrics for processes that have log events but weren't captured by NVML
+        // (e.g., processes that finished, or short-lived processes)
+        for (const auto& [pid, events] : allProcessEvents) {
+            if (processedPids.find(pid) != processedPids.end()) {
+                continue; // Already processed with NVML data
+            }
+
+            // Enrich from log events only
+            EnrichedProcessData enriched = enrichProcessData(events, pid);
+
+            // Create empty process metrics (no NVML data available)
+            ProcessMetrics emptyMetrics;
+            emptyMetrics.pid = pid;
+            emptyMetrics.processName = enriched.appName.empty() ? "unknown" : enriched.appName;
+
+            std::cout << "  Process (log-only): PID=" << pid
+                      << ", App=" << enriched.appName;
+            if (!enriched.kernelName.empty()) {
+                std::cout << ", Kernel=" << enriched.kernelName;
+            }
+            if (!enriched.tag.empty()) {
+                std::cout << ", Tag=" << enriched.tag;
+            }
+            std::cout << " (not in NVML)" << std::endl;
+
+            // Send with unknown GPU (we don't know which GPU this process used)
+            sender_->send(buildProcessMetricJson(
+                aggregationTimestamp, hostname_, "unknown", "unknown",
+                pid, emptyMetrics.processName, emptyMetrics, enriched
+            ));
         }
 
         ++iter;

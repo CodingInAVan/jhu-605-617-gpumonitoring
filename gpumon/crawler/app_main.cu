@@ -22,53 +22,28 @@ static Channel channelFromEnv() {
     return Channel::HTTP;
 }
 
-// Parse clientlib log paths from environment variable or default locations
-static std::vector<std::string> getClientLogPaths() {
+// Scan log directory for gpumon_*.log files
+static std::vector<std::string> getClientLogPaths(const std::string& logDir) {
     std::vector<std::string> logPaths;
 
-    // Check environment variable for explicit paths (comma-separated)
-    std::string envPaths = util::getenvOr("GPUMON_CLIENT_LOGS", "");
-    if (!envPaths.empty()) {
-        std::stringstream ss(envPaths);
-        std::string path;
-        while (std::getline(ss, path, ',')) {
-            // Trim whitespace
-            size_t start = path.find_first_not_of(" \t\r\n");
-            size_t end = path.find_last_not_of(" \t\r\n");
-            if (start != std::string::npos) {
-                path = path.substr(start, end - start + 1);
-                logPaths.push_back(path);
-            }
-        }
+    if (logDir.empty()) {
+        return logPaths;
     }
 
-    // If no explicit paths, check default locations
-    if (logPaths.empty()) {
-        std::vector<std::string> defaultPaths = {
-            "gpumon.log",                    // Current directory
-            "./gpumon.log",
-        };
-
-#ifdef _WIN32
-        const char* appdata = std::getenv("APPDATA");
-        if (appdata) {
-            defaultPaths.push_back(std::string(appdata) + "\\gpumon\\gpumon.log");
-        }
-        defaultPaths.push_back("C:\\ProgramData\\gpumon\\gpumon.log");
-#else
-        const char* home = std::getenv("HOME");
-        if (home) {
-            defaultPaths.push_back(std::string(home) + "/.gpumon/gpumon.log");
-        }
-        defaultPaths.push_back("/var/log/gpumon/gpumon.log");
-#endif
-
-        // Only add paths that exist
-        for (const auto& path : defaultPaths) {
-            if (fs::exists(path)) {
-                logPaths.push_back(path);
+    // Scan the directory for all gpumon_*.log files
+    if (fs::exists(logDir) && fs::is_directory(logDir)) {
+        std::cout << "Scanning for gpumon logs in: " << logDir << std::endl;
+        for (const auto& entry : fs::directory_iterator(logDir)) {
+            if (entry.is_regular_file() && entry.path().extension() == ".log") {
+                // Only match gpumon_*.log files
+                std::string filename = entry.path().filename().string();
+                if (filename.find("gpumon_") == 0) {
+                    logPaths.push_back(entry.path().string());
+                }
             }
         }
+    } else {
+        std::cerr << "Warning: Log directory '" << logDir << "' does not exist or is not a directory" << std::endl;
     }
 
     return logPaths;
@@ -121,15 +96,21 @@ int main(int argc, char** argv) {
 
         // Normal run
         // Get clientlib log paths for enrichment
-        std::vector<std::string> logPaths = getClientLogPaths();
+        std::vector<std::string> logPaths = getClientLogPaths(settings.logDirectory);
         if (!logPaths.empty()) {
             std::cout << "Will monitor " << logPaths.size() << " clientlib log file(s) for enrichment:" << std::endl;
             for (const auto& path : logPaths) {
                 std::cout << "  - " << path << std::endl;
             }
+        } else if (!settings.logDirectory.empty()) {
+            std::cout << "Warning: No gpumon_*.log files found in " << settings.logDirectory << std::endl;
+            std::cout << "Process metrics will not be enriched." << std::endl;
         } else {
-            std::cout << "No clientlib log files found. Process metrics will not be enriched." << std::endl;
-            std::cout << "Set GPUMON_CLIENT_LOGS environment variable to specify log file paths." << std::endl;
+            std::cout << "No log directory configured. Process metrics will not be enriched." << std::endl;
+            std::cout << "To enable enrichment:" << std::endl;
+            std::cout << "  - Set GPUMON_LOG_DIR environment variable" << std::endl;
+            std::cout << "  - Or use --log-dir=/path/to/logs" << std::endl;
+            std::cout << "  - Or edit config file to add logDirectory" << std::endl;
         }
 
         GpuMonitor monitor(std::move(sender), logPaths);

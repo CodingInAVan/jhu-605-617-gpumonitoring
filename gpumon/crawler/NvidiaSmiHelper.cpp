@@ -41,24 +41,11 @@ std::vector<SmiProcessInfo> queryProcessMemoryViaSmi(unsigned int deviceIndex) {
 
     int exitCode = _pclose(pipe);
 
-    std::cout << "[DEBUG] nvidia-smi output:" << std::endl;
-    std::cout << "--- START ---" << std::endl;
-    std::cout << (fullOutput.empty() ? "(empty)" : fullOutput);
-    std::cout << "--- END ---" << std::endl;
-    std::cout << "[DEBUG] Exit code: " << exitCode << std::endl;
-
     if (exitCode != 0 || fullOutput.empty()) {
         std::cout << "[INFO] nvidia-smi did not return process data for GPU " << deviceIndex << std::endl;
         return result;
     }
 
-    // Parse the text output from "nvidia-smi -q -d PIDS"
-    // Expected format:
-    //   Processes
-    //       Process ID                    : 1234
-    //       Type                          : C
-    //       Process Name                  : python.exe
-    //       Used GPU Memory               : 512 MiB
     std::istringstream outputStream(fullOutput);
     std::string line;
     int validEntries = 0;
@@ -124,7 +111,7 @@ std::vector<SmiProcessInfo> queryProcessMemoryViaSmi(unsigned int deviceIndex) {
                 }
 
                 try {
-                    currentProcess.usedMemoryMiB = static_cast<uint64_t>(std::stoull(memStr));
+                    currentProcess.usedMemoryMiB = std::stoull(memStr);
                 } catch (...) {}
             }
         }

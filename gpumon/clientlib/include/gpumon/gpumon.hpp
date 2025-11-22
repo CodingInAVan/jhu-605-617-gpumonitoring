@@ -25,7 +25,7 @@ namespace gpumon {
 
 struct InitOptions {
     std::string appName;
-    std::string logFilePath;   // where NDJSON logs are written
+    std::string logFilePath;   // where NDJSON logs are written (can be empty to use default)
 };
 
 // ============================================================================
@@ -62,10 +62,93 @@ inline int32_t getPid() {
 #endif
 }
 
+inline std::string getDefaultLogPath(const std::string& appName, int32_t pid) {
+    // Check environment variable for log directory
+    const char* logDirEnv = std::getenv("GPUMON_LOG_DIR");
+
+    if (!logDirEnv || logDirEnv[0] == '\0') {
+        // No directory configured - return empty string to disable logging
+        return "";
+    }
+
+    std::string logDir = logDirEnv;
+
+    // Build log file name: gpumon_{appName}_{pid}.log
+    std::ostringstream oss;
+    oss << logDir;
+
+#ifdef _WIN32
+    if (!logDir.empty() && logDir.back() != '\\' && logDir.back() != '/') {
+        oss << "\\";
+    }
+#else
+    if (!logDir.empty() && logDir.back() != '/') {
+        oss << "/";
+    }
+#endif
+
+    oss << "gpumon_" << appName << "_" << pid << ".log";
+    return oss.str();
+}
+
 inline int64_t getTimestampNs() {
     auto now = std::chrono::steady_clock::now();
     auto duration = now.time_since_epoch();
     return std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();
+}
+
+// Structure to hold GPU memory snapshot
+struct MemorySnapshot {
+    size_t freeMiB = 0;
+    size_t totalMiB = 0;
+    size_t usedMiB = 0;
+    int deviceId = 0;
+    bool valid = false;
+};
+
+// Query current GPU memory usage across all visible devices
+inline std::vector<MemorySnapshot> getMemorySnapshots() {
+    std::vector<MemorySnapshot> snapshots;
+
+    int deviceCount = 0;
+    cudaError_t err = cudaGetDeviceCount(&deviceCount);
+    if (err != cudaSuccess || deviceCount == 0) {
+        return snapshots;
+    }
+
+    // Save current device to restore later
+    int currentDevice = -1;
+    err = cudaGetDevice(&currentDevice);
+    if (err != cudaSuccess) {
+        // If we can't get current device, default to 0
+        currentDevice = 0;
+    }
+
+    for (int dev = 0; dev < deviceCount; ++dev) {
+        // Set device before querying memory
+        err = cudaSetDevice(dev);
+        if (err != cudaSuccess) continue;
+
+        size_t freeMem = 0, totalMem = 0;
+        err = cudaMemGetInfo(&freeMem, &totalMem);
+
+        if (err == cudaSuccess) {
+            MemorySnapshot snap;
+            snap.deviceId = dev;
+            snap.freeMiB = freeMem / (1024 * 1024);
+            snap.totalMiB = totalMem / (1024 * 1024);
+            snap.usedMiB = snap.totalMiB - snap.freeMiB;
+            snap.valid = true;
+            snapshots.push_back(snap);
+        }
+    }
+
+    // Restore original device (ignore errors on restore)
+    if (currentDevice >= 0) {
+        cudaSetDevice(currentDevice);
+    }
+
+    return snapshots;
 }
 
 inline void writeLogLine(const std::string& jsonLine) {
@@ -116,30 +199,46 @@ inline bool init(const InitOptions& opts) {
     auto& initMutex = detail::getInitMutex();
 
     std::lock_guard<std::mutex> initLock(initMutex);
-    
+
     if (state.initialized) {
         return false; // Already initialized
     }
-    
+
     state.appName = opts.appName;
     state.pid = detail::getPid();
-    
-    state.logFile.open(opts.logFilePath, std::ios::out | std::ios::app);
-    if (!state.logFile.is_open()) {
-        return false;
+
+    // Determine log file path
+    std::string logPath = opts.logFilePath;
+    if (logPath.empty()) {
+        // Use default path based on GPUMON_LOG_DIR environment variable
+        logPath = detail::getDefaultLogPath(state.appName, state.pid);
     }
-    
+
+    // If no log path configured, initialize in silent mode (no logging)
+    if (logPath.empty()) {
+        state.initialized = true;
+        return true;
+    }
+
+    state.logFile.open(logPath, std::ios::out | std::ios::app);
+    if (!state.logFile.is_open()) {
+        // Failed to open log file - operate in silent mode
+        state.initialized = true;
+        return true;
+    }
+
     state.initialized = true;
-    
-    // Write initialization event
+
+    // Write initialization event with log path for reference
     std::ostringstream oss;
     oss << "{\"type\":\"init\","
         << "\"pid\":" << state.pid << ","
         << "\"app\":\"" << detail::escapeJson(state.appName) << "\","
+        << "\"logPath\":\"" << detail::escapeJson(logPath) << "\","
         << "\"ts_ns\":" << detail::getTimestampNs()
         << "}";
     detail::writeLogLine(oss.str());
-    
+
     return true;
 }
 
@@ -214,6 +313,9 @@ public:
         detail::State& state = detail::getState();
         if (!state.initialized) return;
 
+        // Capture memory at scope start
+        memStart_ = detail::getMemorySnapshots();
+
         std::ostringstream oss;
         oss << "{\"type\":\"scope_begin\","
             << "\"pid\":" << state.pid << ","
@@ -222,6 +324,21 @@ public:
 
         if (!tag_.empty()) {
             oss << ",\"tag\":\"" << detail::escapeJson(tag_) << "\"";
+        }
+
+        // Add memory info for each device
+        if (!memStart_.empty()) {
+            oss << ",\"mem_start\":[";
+            for (size_t i = 0; i < memStart_.size(); ++i) {
+                if (i > 0) oss << ",";
+                const auto& mem = memStart_[i];
+                oss << "{\"device\":" << mem.deviceId
+                    << ",\"used_mib\":" << mem.usedMiB
+                    << ",\"free_mib\":" << mem.freeMiB
+                    << ",\"total_mib\":" << mem.totalMiB
+                    << "}";
+            }
+            oss << "]";
         }
 
         oss << ",\"ts_ns\":" << tsStart_
@@ -234,6 +351,10 @@ public:
         if (!state.initialized) return;
 
         int64_t tsEnd = detail::getTimestampNs();
+
+        // Capture memory at scope end
+        auto memEnd = detail::getMemorySnapshots();
+
         std::ostringstream oss;
         oss << "{\"type\":\"scope_end\","
             << "\"pid\":" << state.pid << ","
@@ -246,8 +367,37 @@ public:
 
         oss << ",\"ts_start_ns\":" << tsStart_ << ","
             << "\"ts_end_ns\":" << tsEnd << ","
-            << "\"duration_ns\":" << (tsEnd - tsStart_)
-            << "}";
+            << "\"duration_ns\":" << (tsEnd - tsStart_);
+
+        // Add end memory info
+        if (!memEnd.empty()) {
+            oss << ",\"mem_end\":[";
+            for (size_t i = 0; i < memEnd.size(); ++i) {
+                if (i > 0) oss << ",";
+                const auto& mem = memEnd[i];
+                oss << "{\"device\":" << mem.deviceId
+                    << ",\"used_mib\":" << mem.usedMiB
+                    << ",\"free_mib\":" << mem.freeMiB
+                    << ",\"total_mib\":" << mem.totalMiB
+                    << "}";
+            }
+            oss << "]";
+        }
+
+        // Calculate memory delta (if we have both start and end)
+        if (!memStart_.empty() && !memEnd.empty() && memStart_.size() == memEnd.size()) {
+            oss << ",\"mem_delta\":[";
+            for (size_t i = 0; i < memStart_.size(); ++i) {
+                if (i > 0) oss << ",";
+                int64_t delta = static_cast<int64_t>(memEnd[i].usedMiB) - static_cast<int64_t>(memStart_[i].usedMiB);
+                oss << "{\"device\":" << memStart_[i].deviceId
+                    << ",\"delta_mib\":" << delta
+                    << "}";
+            }
+            oss << "]";
+        }
+
+        oss << "}";
         detail::writeLogLine(oss.str());
     }
 
@@ -261,6 +411,7 @@ private:
     std::string name_;
     std::string tag_;
     int64_t tsStart_;
+    std::vector<detail::MemorySnapshot> memStart_;
 };
 
 // Lambda-based wrapper for functional-style monitoring
@@ -337,23 +488,6 @@ inline const char* getCudaErrorString(cudaError_t error) {
             block, \
             sharedMem, \
             gpumon::detail::getCudaErrorString(_gpumon_err) \
-        ); \
-    } while(0)
-
-#define GPUMON_LAUNCH_ASYNC(Kernel, grid, block, sharedMem, stream, ...) \
-    do { \
-        int64_t _gpumon_ts_start = gpumon::detail::getTimestampNs(); \
-        kernel<<<grid, block, sharedMem, stream>>>(__VA_ARGS__); \
-        cudaError_t _gpumon_err = cudaGetLastError(); \
-        int64_t _gpumon_ts_end = gpumon::detail::getTimestampNs(); \
-        gpumon::detail::logKernelEvent( \
-        #kernel, \
-        _gpumon_ts_start, \
-        _gpumon_ts_end, \
-        grid, \
-        block, \
-        sharedMem, \
-        gpumon::detail::getCudaErrorString(_gpumon_err) \
         ); \
     } while(0)
 

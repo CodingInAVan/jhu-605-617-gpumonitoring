@@ -24,6 +24,11 @@ struct ClientEvent {
     std::string regionName;  // from region_begin/region_end
     std::string scopeName;   // from scope_begin/scope_end
 
+    // Memory tracking fields (from scope_begin/scope_end)
+    int64_t memStartUsedMiB = 0;
+    int64_t memEndUsedMiB = 0;
+    int64_t memDeltaMiB = 0;
+
     // Common optional field
     std::string tag;
 };
@@ -32,18 +37,24 @@ class ClientLogReader {
 public:
     explicit ClientLogReader(std::string  logFilePath);
 
-    // Read all new events from the log file (since last read)
-    std::vector<ClientEvent> readNewEvents();
+    // Read all new events from the log file (since last read) and cache them
+    // Returns the number of new events read
+    size_t readNewEvents();
 
-    // Get events for a specific PID within a time window
-    std::vector<ClientEvent> getEventsForPid(int32_t pid, int64_t startNs, int64_t endNs) const;
+    // Get all process events within a time window from cached events
+    // Returns a map: PID -> list of events for that process
+    std::map<int32_t, std::vector<ClientEvent>> getAllProcessEvents(int64_t startNs, int64_t endNs);
 
     // Check if log file exists and is readable
     bool isValid() const;
 
+    // Get total number of cached events
+    size_t getCachedEventCount() const { return cachedEvents_.size(); }
+
 private:
     std::string logFilePath_;
     std::streampos lastPosition_;
+    std::vector<ClientEvent> cachedEvents_;  // Cache of all events read so far
 
     // Parse a single NDJSON line into a ClientEvent
     static std::optional<ClientEvent> parseLine(const std::string& line);
