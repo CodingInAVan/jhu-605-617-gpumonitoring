@@ -1,251 +1,136 @@
 #include "ClientLogReader.h"
+
+#include <filesystem>
 #include <iostream>
 #include <utility>
 
-ClientLogReader::ClientLogReader(std::string  logFilePath)
-    : logFilePath_(std::move(logFilePath)), lastPosition_(0) {
-}
+#include "JsonUtils.h"
 
-bool ClientLogReader::isValid() const {
-    const std::ifstream file(logFilePath_);
-    return file.good();
-}
+namespace gpumon {
+    ClientLogReader::ClientLogReader(std::string logFilePath, const bool debugMode)
+        : logFilePath_(std::move(logFilePath)), debugMode_(debugMode), lastPosition_(0) {
+    }
 
-std::string ClientLogReader::extractJsonString(const std::string& json, const std::string& key) {
-    const std::string needle = "\"" + key + "\":\"";
-    const size_t pos = json.find(needle);
-    if (pos == std::string::npos) return "";
+    bool ClientLogReader::isValid() const {
+        return std::filesystem::exists(logFilePath_);
+    }
 
-    size_t start = pos + needle.length();
-    size_t end = start;
+    std::optional<ClientEvent> ClientLogReader::parseLine(const std::string& line) {
+        if (line.empty() || line[0] != '{') return std::nullopt;
 
-    // Handle escaped quotes
-    while (end < json.length()) {
-        if (json[end] == '\\' && end + 1 < json.length()) {
-            end += 2; // Skip escaped character
-            continue;
+        ClientEvent event;
+
+        event.type = JsonUtils::extractString(line, "type");
+        if (event.type.empty()) return std::nullopt;
+
+        event.pid = static_cast<int32_t>(JsonUtils::extractInt(line, "pid"));
+        event.appName = JsonUtils::extractString(line, "app");
+        event.tag = JsonUtils::extractString(line, "tag");
+        event.tsNs = JsonUtils::extractInt(line, "ts_ns");
+
+        // 2. Event Type Specific Parsing
+        if (event.type == "kernel") {
+            event.kernelName = JsonUtils::extractString(line, "kernel");
+            event.tsStartNs = JsonUtils::extractInt(line, "ts_start_ns");
+            event.tsEndNs = JsonUtils::extractInt(line, "ts_end_ns");
+            event.durationNs = JsonUtils::extractInt(line, "duration_ns");
         }
-        if (json[end] == '"') {
-            break;
-        }
-        end++;
-    }
+        else if (event.type == "scope_begin" || event.type == "scope_end") {
+            event.scopeName = JsonUtils::extractString(line, "name");
+            event.tsStartNs = JsonUtils::extractInt(line, "ts_start_ns");
+            event.tsEndNs = JsonUtils::extractInt(line, "ts_end_ns");
+            event.durationNs = JsonUtils::extractInt(line, "duration_ns");
 
-    return json.substr(start, end - start);
-}
+            // 3. Memory Parsing (Consolidated)
+            if (event.type == "scope_begin") {
+                event.memStartUsedMiB = JsonUtils::extractNestedInt(line, "memory", "used_mib");
+                event.deviceId = static_cast<int32_t>(JsonUtils::extractNestedInt(line, "memory", "device"));
+            } else { // scope_end
+                event.memEndUsedMiB = JsonUtils::extractNestedInt(line, "memory", "used_mib");
 
-int64_t ClientLogReader::extractJsonInt(const std::string& json, const std::string& key) {
-    const std::string needle = "\"" + key + "\":";
-    const size_t pos = json.find(needle);
-    if (pos == std::string::npos) return 0;
-
-    const size_t start = pos + needle.length();
-    size_t end = start;
-
-    // Find end of number (comma, space, or closing brace)
-    while (end < json.length() &&
-           json[end] != ',' &&
-           json[end] != '}' &&
-           json[end] != ' ' &&
-           json[end] != '\r' &&
-           json[end] != '\n') {
-        end++;
-    }
-
-    const std::string numStr = json.substr(start, end - start);
-    try {
-        return std::stoll(numStr);
-    } catch (...) {
-        return 0;
-    }
-}
-
-std::optional<ClientEvent> ClientLogReader::parseLine(const std::string& line) {
-    if (line.empty() || line[0] != '{') return std::nullopt;
-
-    ClientEvent event;
-    std::cout << "[ClientLogReader] Parsing line: " << line << std::endl;
-    // Extract common fields
-    event.type = extractJsonString(line, "type");
-    event.pid = static_cast<int32_t>(extractJsonInt(line, "pid"));
-    event.appName = extractJsonString(line, "app");
-    event.tag = extractJsonString(line, "tag");
-
-    // Extract timestamp (varies by event type)
-    if (line.find("\"ts_ns\":") != std::string::npos) {
-        event.tsNs = extractJsonInt(line, "ts_ns");
-    }
-
-    // Extract type-specific fields
-    if (event.type == "kernel") {
-        event.kernelName = extractJsonString(line, "kernel");
-        event.tsStartNs = extractJsonInt(line, "ts_start_ns");
-        event.tsEndNs = extractJsonInt(line, "ts_end_ns");
-        event.durationNs = extractJsonInt(line, "duration_ns");
-    } else if (event.type == "region_begin" || event.type == "region_end") {
-        event.regionName = extractJsonString(line, "name");
-    } else if (event.type == "scope_begin" || event.type == "scope_end") {
-        event.scopeName = extractJsonString(line, "name");
-        event.tsStartNs = extractJsonInt(line, "ts_start_ns");
-        event.tsEndNs = extractJsonInt(line, "ts_end_ns");
-        event.durationNs = extractJsonInt(line, "duration_ns");
-
-        // Extract memory data (simplified: use first device if multiple)
-        // mem_start:[{"device":0,"used_mib":1024,...}]
-        if (event.type == "scope_begin" && line.find("\"mem_start\":") != std::string::npos) {
-            // Simple extraction: find first "used_mib" value in mem_start array
-            size_t memStartPos = line.find("\"mem_start\":");
-            if (memStartPos != std::string::npos) {
-                size_t usedPos = line.find("\"used_mib\":", memStartPos);
-                if (usedPos != std::string::npos) {
-                    size_t colonPos = usedPos + 11; // length of "used_mib":
-                    // Skip whitespace after colon
-                    while (colonPos < line.length() && (line[colonPos] == ' ' || line[colonPos] == '\t')) {
-                        colonPos++;
-                    }
-                    size_t endPos = colonPos;
-                    while (endPos < line.length() && (std::isdigit(line[endPos]) || line[endPos] == '-')) {
-                        endPos++;
-                    }
-                    if (endPos > colonPos) {
-                        std::string valStr = line.substr(colonPos, endPos - colonPos);
-                        try {
-                            event.memStartUsedMiB = std::stoll(valStr);
-                            std::cout << "[ClientLogReader] Parsed mem_start used_mib: " << event.memStartUsedMiB << " from: " << valStr << std::endl;
-                        } catch (...) {
-                            std::cerr << "[ClientLogReader] Failed to parse mem_start used_mib from: " << valStr << std::endl;
-                        }
-                    }
+                // Try to extract device ID if we don't have it (fallback)
+                if (event.deviceId == -1) {
+                    event.deviceId = static_cast<int32_t>(JsonUtils::extractNestedInt(line, "memory", "device"));
                 }
+
+                // It will be 0 here, but can be calculated later by comparing start/end events if needed.
+                event.memDeltaMiB = 0;
             }
         }
 
-        // mem_end:[{"device":0,"used_mib":2048,...}]
-        if (event.type == "scope_end" && line.find("\"mem_end\":") != std::string::npos) {
-            std::cout << "line = " << line << std::endl;
+        return event;
+    }
 
-            size_t memEndPos = line.find("\"mem_end\":");
-            if (memEndPos != std::string::npos) {
-                size_t usedPos = line.find("\"used_mib\":", memEndPos);
-                if (usedPos != std::string::npos) {
-                    size_t colonPos = usedPos + 11;
-                    // Skip whitespace after colon
-                    while (colonPos < line.length() && (line[colonPos] == ' ' || line[colonPos] == '\t')) {
-                        colonPos++;
+    size_t ClientLogReader::readNewEvents() {
+        std::ifstream file(logFilePath_, std::ios::binary);
+        if (!file.is_open()) return 0;
+
+        file.seekg(0, std::ios::end);
+        if (const std::streampos currentSize = file.tellg(); currentSize < lastPosition_) {
+            if (debugMode_) {
+                std::cout << "[ClientLogReader] Log rotation detected. Resetting cursor." << std::endl;
+            }
+            lastPosition_ = 0;
+        }
+
+        file.seekg(lastPosition_);
+
+        size_t count = 0;
+        std::string line;
+        while (std::getline(file, line)) {
+            if (auto event = parseLine(line); event.has_value()) {
+                if (debugMode_) {
+                    std::cout << "[LogEvent] PID:" << event->pid << " Type:" << event->type
+                          << " App:" << event->appName;
+                    if (!event->kernelName.empty()) std::cout << " Kernel:" << event->kernelName;
+                    if (!event->scopeName.empty()) std::cout << " Scope:" << event->scopeName;
+
+                    if (event->type == "scope_begin") {
+                        std::cout << " MemStart:" << event->memStartUsedMiB << " Dev:" << event->deviceId;
+                    } else if (event->type == "scope_end") {
+                        std::cout << " MemEnd:" << event->memEndUsedMiB;
                     }
-                    size_t endPos = colonPos;
-                    while (endPos < line.length() && (std::isdigit(line[endPos]) || line[endPos] == '-')) {
-                        endPos++;
-                    }
-                    if (endPos > colonPos) {
-                        std::string valStr = line.substr(colonPos, endPos - colonPos);
-                        try {
-                            event.memEndUsedMiB = std::stoll(valStr);
-                            std::cout << "[ClientLogReader] Parsed mem_end used_mib: " << event.memEndUsedMiB << " from: " << valStr << std::endl;
-                        } catch (...) {
-                            std::cerr << "[ClientLogReader] Failed to parse mem_end used_mib from: " << valStr << std::endl;
-                        }
-                    }
+                    std::cout << std::endl;
                 }
+                cachedEvents_.push_back(event.value());
+                count++;
             }
         }
 
-        // mem_delta:[{"device":0,"delta_mib":512}]
-        if (event.type == "scope_end" && line.find("\"mem_delta\":") != std::string::npos) {
-            size_t memDeltaPos = line.find("\"mem_delta\":");
-            if (memDeltaPos != std::string::npos) {
-                size_t deltaPos = line.find("\"delta_mib\":", memDeltaPos);
-                if (deltaPos != std::string::npos) {
-                    size_t colonPos = deltaPos + 12; // length of "delta_mib":
-                    // Skip whitespace after colon
-                    while (colonPos < line.length() && (line[colonPos] == ' ' || line[colonPos] == '\t')) {
-                        colonPos++;
-                    }
-                    size_t endPos = colonPos;
-                    while (endPos < line.length() && (std::isdigit(line[endPos]) || line[endPos] == '-')) {
-                        endPos++;
-                    }
-                    if (endPos > colonPos) {
-                        std::string valStr = line.substr(colonPos, endPos - colonPos);
-                        try {
-                            event.memDeltaMiB = std::stoll(valStr);
-                            std::cout << "[ClientLogReader] Parsed mem_delta delta_mib: " << event.memDeltaMiB << " from: " << valStr << std::endl;
-                        } catch (...) {
-                            std::cerr << "[ClientLogReader] Failed to parse mem_delta delta_mib from: " << valStr << std::endl;
-                        }
-                    }
-                }
+        if (file.eof()) file.clear();
+        lastPosition_ = file.tellg();
+        return count;
+    }
+
+    std::map<int32_t, std::vector<ClientEvent> > ClientLogReader::getAllProcessEvents(int64_t startNs, int64_t endNs) const {
+        std::map<int32_t, std::vector<ClientEvent>> result;
+
+        for (const auto& event : cachedEvents_) {
+            // For durations, check overlaps. For points, check timestamp.
+            int64_t evtTime = event.tsNs;
+
+            // Use start time for ranges to determine if they started in this window
+            if (event.tsStartNs > 0) evtTime = event.tsStartNs;
+
+            if (evtTime >= startNs && evtTime <= endNs) {
+                result[event.pid].push_back(event);
             }
         }
+
+        return result;
     }
 
-    return event;
-}
+    void ClientLogReader::pruneOldEvents(int64_t olderThanNs) {
+        if (cachedEvents_.empty()) return;
 
-size_t ClientLogReader::readNewEvents() {
-    size_t newEventCount = 0;
+        const auto it = std::remove_if(cachedEvents_.begin(), cachedEvents_.end(), [olderThanNs](const ClientEvent& e) {
+            const int64_t timeToCheck = (e.tsEndNs >0) ? e.tsEndNs : e.tsNs;
+            return timeToCheck < olderThanNs;
+        });
 
-    std::ifstream file(logFilePath_, std::ios::binary);
-    if (!file.is_open()) {
-        std::cerr << "[ClientLogReader::readNewEvents] Failed to open: " << logFilePath_ << std::endl;
-        return 0;
-    }
-
-    // Seek to last read position
-    std::cout << "[ClientLogReader::readNewEvents] Reading from position: " << lastPosition_
-              << " in file: " << logFilePath_ << std::endl;
-    file.seekg(lastPosition_);
-
-    std::string line;
-    while (std::getline(file, line)) {
-        std::cout << "[ClientLogReader::readNewEvents] Read line: " << line << std::endl;
-        auto event = parseLine(line);
-        if (event.has_value()) {
-            cachedEvents_.push_back(event.value());
-            newEventCount++;
-            std::cout << "[ClientLogReader::readNewEvents] Added event to cache: type=" << event->type
-                      << ", pid=" << event->pid << std::endl;
+        if (it != cachedEvents_.end()) {
+            if (debugMode_) std::cout << "[ClientLogReader] Pruned " << std::distance(it, cachedEvents_.end()) << " old events." << std::endl;
+            cachedEvents_.erase(it, cachedEvents_.end());
         }
     }
-
-    // Update last position
-    if (file.eof()) {
-        file.clear();
-    }
-    lastPosition_ = file.tellg();
-    std::cout << "[ClientLogReader::readNewEvents] Read " << newEventCount
-              << " new events. Total cached: " << cachedEvents_.size()
-              << ". New position: " << lastPosition_ << std::endl;
-
-    return newEventCount;
-}
-
-std::map<int32_t, std::vector<ClientEvent>> ClientLogReader::getAllProcessEvents(
-    const int64_t startNs, const int64_t endNs) {
-    std::map<int32_t, std::vector<ClientEvent>> processEvents;
-
-    std::cout << "[ClientLogReader::getAllProcessEvents] Searching " << cachedEvents_.size()
-              << " cached events in time range: " << startNs << " to " << endNs << std::endl;
-
-    // Group all events by PID within the time window
-    for (const auto& event : cachedEvents_) {
-        // Filter by timestamp window
-        int64_t eventTime = event.tsNs;
-        if (event.type == "kernel" || event.type == "scope_end") {
-            // Use start time for range check
-            eventTime = event.tsStartNs;
-        }
-
-        if (eventTime >= startNs && eventTime <= endNs) {
-            processEvents[event.pid].push_back(event);
-        }
-    }
-
-    std::cout << "[ClientLogReader::getAllProcessEvents] Found events for " << processEvents.size()
-              << " processes" << std::endl;
-    for (const auto& [pid, events] : processEvents) {
-        std::cout << "  PID " << pid << ": " << events.size() << " events" << std::endl;
-    }
-
-    return processEvents;
 }

@@ -7,6 +7,8 @@
 #include <optional>
 #include <cstdint>
 
+namespace gpumon {
+
 // Structure representing a clientlib event from NDJSON log
 struct ClientEvent {
     std::string type;           // "init", "kernel", "region_begin", "region_end", "scope_begin", "scope_end", "shutdown"
@@ -24,7 +26,8 @@ struct ClientEvent {
     std::string regionName;  // from region_begin/region_end
     std::string scopeName;   // from scope_begin/scope_end
 
-    // Memory tracking fields (from scope_begin/scope_end)
+    // Memory tracking fields
+    int32_t deviceId = -1;
     int64_t memStartUsedMiB = 0;
     int64_t memEndUsedMiB = 0;
     int64_t memDeltaMiB = 0;
@@ -35,7 +38,8 @@ struct ClientEvent {
 
 class ClientLogReader {
 public:
-    explicit ClientLogReader(std::string  logFilePath);
+    explicit ClientLogReader(std::string logFilePath, bool debugMode);
+    ~ClientLogReader() = default;
 
     // Read all new events from the log file (since last read) and cache them
     // Returns the number of new events read
@@ -43,25 +47,24 @@ public:
 
     // Get all process events within a time window from cached events
     // Returns a map: PID -> list of events for that process
-    std::map<int32_t, std::vector<ClientEvent>> getAllProcessEvents(int64_t startNs, int64_t endNs);
+    [[nodiscard]] std::map<int32_t, std::vector<ClientEvent>> getAllProcessEvents(int64_t startNs, int64_t endNs) const;
+
+    void pruneOldEvents(int64_t olderThanNs);
 
     // Check if log file exists and is readable
-    bool isValid() const;
+    [[nodiscard]] bool isValid() const;
 
     // Get total number of cached events
-    size_t getCachedEventCount() const { return cachedEvents_.size(); }
+    [[nodiscard]] size_t getCachedEventCount() const { return cachedEvents_.size(); }
 
 private:
     std::string logFilePath_;
+    bool debugMode_;
     std::streampos lastPosition_;
     std::vector<ClientEvent> cachedEvents_;  // Cache of all events read so far
 
     // Parse a single NDJSON line into a ClientEvent
     static std::optional<ClientEvent> parseLine(const std::string& line);
-
-    // Helper to extract JSON string value
-    static std::string extractJsonString(const std::string& json, const std::string& key);
-
-    // Helper to extract JSON integer value
-    static int64_t extractJsonInt(const std::string& json, const std::string& key);
 };
+
+}

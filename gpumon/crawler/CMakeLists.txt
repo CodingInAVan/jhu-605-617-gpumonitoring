@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
 
 add_executable(crawler app_main.cu MetricsSender.cpp GpuMonitor.cpp Config.cpp
-        NvidiaSmiHelper.cpp ClientLogReader.cpp)
+        NvidiaSmiHelper.cpp ClientLogReader.cpp JsonUtils.cpp)
 
 find_library(NVML_LIBRARY
         NAMES nvml
