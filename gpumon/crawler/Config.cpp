@@ -56,6 +56,7 @@ Settings load() {
     Settings s;
     s.backendUrl = "";
     s.apiKey = "";
+    s.logDirectory = "";
 
     ifstream f(configPath(), ios::in | ios::binary);
     if (!f) return s;
@@ -63,6 +64,7 @@ Settings load() {
     string content = oss.str();
     s.backendUrl = extractJsonString(content, "backendUrl");
     s.apiKey     = extractJsonString(content, "apiKey");
+    s.logDirectory = extractJsonString(content, "logDirectory");
     return s;
 }
 
@@ -77,8 +79,11 @@ void save(const Settings& s) {
     }
     f << "{\n";
     f << "  \"backendUrl\": \"" << util::escapeJson(s.backendUrl) << "\",\n";
-    f << "  \"apiKey\": \"" << util::escapeJson(s.apiKey) << "\"\n";
-    f << "}\n";
+    f << "  \"apiKey\": \"" << util::escapeJson(s.apiKey) << "\"";
+    if (!s.logDirectory.empty()) {
+        f << ",\n  \"logDirectory\": \"" << util::escapeJson(s.logDirectory) << "\"";
+    }
+    f << "\n}\n";
 }
 
 static bool argEq(const string& a, const char* b){ return a == b; }
@@ -90,6 +95,7 @@ Settings resolveFromSources(int argc, char** argv) {
     // 1) Start with config file
     s.backendUrl = file.backendUrl.empty() ? util::getenvOr("GPU_BACKEND_URL", "http://localhost:8080") : file.backendUrl;
     s.apiKey     = file.apiKey;
+    s.logDirectory = file.logDirectory;
 
     // 2) Env override
     {
@@ -97,6 +103,8 @@ Settings resolveFromSources(int argc, char** argv) {
         if (!envUrl.empty()) s.backendUrl = envUrl;
         string envKey = util::getenvOr("GPU_API_KEY", "");
         if (!envKey.empty()) s.apiKey = envKey;
+        string envLogDir = util::getenvOr("GPUMON_LOG_DIR", "");
+        if (!envLogDir.empty()) s.logDirectory = envLogDir;
     }
 
     // 3) CLI overrides
@@ -110,6 +118,10 @@ Settings resolveFromSources(int argc, char** argv) {
             s.apiKey = argv[++i];
         } else if (arg.rfind("--api-key=", 0) == 0) {
             s.apiKey = arg.substr(strlen("--api-key="));
+        } else if (argEq(arg, "--log-dir") && i + 1 < argc) {
+            s.logDirectory = argv[++i];
+        } else if (arg.rfind("--log-dir=", 0) == 0) {
+            s.logDirectory = arg.substr(strlen("--log-dir="));
         } else if (argEq(arg, "--self-test")) {
             s.selfTest = true;
         } else if (argEq(arg, "--set-key")) {
@@ -157,7 +169,18 @@ Settings interactiveSetup(const Settings& base) {
     if (backend.empty()) backend = backendDefault;
     s.backendUrl = backend;
 
+    // Ask for log directory
+    if (s.logDirectory.empty()) {
+        cout << "\n3) Client log directory (where gpumon_*.log files are written):" << endl;
+        cout << "   Leave empty to skip process-level enrichment." << endl;
+        string logDir = prompt("Log directory", "");
+        s.logDirectory = logDir;
+    }
+
     cout << "\nWe will send metrics to: " << s.backendUrl << "/metrics with header:\n  X-API-Key: <YOUR_KEY>" << endl;
+    if (!s.logDirectory.empty()) {
+        cout << "Process enrichment enabled from: " << s.logDirectory << endl;
+    }
 
     // Save settings
     save(s);

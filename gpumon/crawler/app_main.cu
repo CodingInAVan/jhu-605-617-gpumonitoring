@@ -3,6 +3,7 @@
 #include <vector>
 #include <string>
 #include <sstream>
+#include <filesystem>
 #include "Utils.h"
 #include "MetricsSender.h"
 #include "GpuMonitor.h"
@@ -14,9 +15,38 @@
 #include <unistd.h>
 #endif
 
+namespace fs = std::filesystem;
+
 static Channel channelFromEnv() {
     // Default to HTTP posting to /metrics
     return Channel::HTTP;
+}
+
+// Scan log directory for gpumon_*.log files
+static std::vector<std::string> getClientLogPaths(const std::string& logDir) {
+    std::vector<std::string> logPaths;
+
+    if (logDir.empty()) {
+        return logPaths;
+    }
+
+    // Scan the directory for all gpumon_*.log files
+    if (fs::exists(logDir) && fs::is_directory(logDir)) {
+        std::cout << "Scanning for gpumon logs in: " << logDir << std::endl;
+        for (const auto& entry : fs::directory_iterator(logDir)) {
+            if (entry.is_regular_file() && entry.path().extension() == ".log") {
+                // Only match gpumon_*.log files
+                std::string filename = entry.path().filename().string();
+                if (filename.find("gpumon_") == 0) {
+                    logPaths.push_back(entry.path().string());
+                }
+            }
+        }
+    } else {
+        std::cerr << "Warning: Log directory '" << logDir << "' does not exist or is not a directory" << std::endl;
+    }
+
+    return logPaths;
 }
 
 static std::string buildSelfTestSampleJson(const std::string& hostname) {
@@ -65,7 +95,25 @@ int main(int argc, char** argv) {
         }
 
         // Normal run
-        GpuMonitor monitor(std::move(sender));
+        // Get clientlib log paths for enrichment
+        std::vector<std::string> logPaths = getClientLogPaths(settings.logDirectory);
+        if (!logPaths.empty()) {
+            std::cout << "Will monitor " << logPaths.size() << " clientlib log file(s) for enrichment:" << std::endl;
+            for (const auto& path : logPaths) {
+                std::cout << "  - " << path << std::endl;
+            }
+        } else if (!settings.logDirectory.empty()) {
+            std::cout << "Warning: No gpumon_*.log files found in " << settings.logDirectory << std::endl;
+            std::cout << "Process metrics will not be enriched." << std::endl;
+        } else {
+            std::cout << "No log directory configured. Process metrics will not be enriched." << std::endl;
+            std::cout << "To enable enrichment:" << std::endl;
+            std::cout << "  - Set GPUMON_LOG_DIR environment variable" << std::endl;
+            std::cout << "  - Or use --log-dir=/path/to/logs" << std::endl;
+            std::cout << "  - Or edit config file to add logDirectory" << std::endl;
+        }
+
+        GpuMonitor monitor(std::move(sender), logPaths);
         monitor.runLoop();
         return 0;
     } catch (const std::exception& ex) {

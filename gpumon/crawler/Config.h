@@ -4,6 +4,7 @@
 struct Settings {
     std::string backendUrl; // e.g., http://localhost:8080
     std::string apiKey;     // API key for X-API-Key
+    std::string logDirectory; // Directory to scan for gpumon_*.log files
     bool selfTest = false;
     bool setKey = false;
 };
