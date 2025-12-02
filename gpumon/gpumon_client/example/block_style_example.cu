@@ -31,6 +31,7 @@ int main() {
     gpumon::InitOptions opts;
     opts.appName = "block_style_demo";
     opts.logFilePath = "gpumon_block.log";
+    opts.sampleIntervalMs = 5;
     
     if (!gpumon::init(opts)) {
         std::cerr << "Failed to initialize gpumon" << std::endl;
@@ -64,9 +65,9 @@ int main() {
     dim3 block(256);
     
     // ========================================================================
-    // Method 1: GPUMON_SCOPE - Block-style (most like Scala)
+    // GPUMON_SCOPE - Block-style (most like Scala)
     // ========================================================================
-    std::cout << "1. Using GPUMON_SCOPE (block-style)..." << std::endl;
+    std::cout << "Using GPUMON_SCOPE (block-style)..." << std::endl;
     
     GPUMON_SCOPE("computation-phase-1") {
         // You can have multiple kernel launches inside the scope
@@ -79,20 +80,11 @@ int main() {
     // Automatically logs scope_end when block exits
     
     std::cout << "   ✓ Scope automatically closed\n" << std::endl;
-    
+
     // ========================================================================
-    // Method 2: GPUMON_LAUNCH_LABELED - Single kernel with label
+    // ScopedMonitor RAII object
     // ========================================================================
-    std::cout << "2. Using GPUMON_LAUNCH_LABELED (single kernel with label)..." << std::endl;
-    
-    GPUMON_LAUNCH_LABELED("important-kernel", vectorScale, grid, block, 0, 0, d_a, 2, n);
-    
-    std::cout << "   ✓ Kernel logged with label\n" << std::endl;
-    
-    // ========================================================================
-    // Method 3: ScopedMonitor RAII object
-    // ========================================================================
-    std::cout << "3. Using ScopedMonitor (RAII object)..." << std::endl;
+    std::cout << "Using ScopedMonitor (RAII object)..." << std::endl;
     
     {
         gpumon::ScopedMonitor monitor("training-epoch-1");

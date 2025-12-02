@@ -1,144 +1,164 @@
-# GPUmon Client Library v0.1
+# GPUmon Client Library (multi-header)
 
-A header-only C++ library for logging GPU kernel activity in CUDA applications.
+Header-only C++ instrumentation library that logs GPU activity and scoped phases in NDJSON, designed for multiple GPU backends. Currently ships with a CUDA backend; other backends can be added behind the same core API.
 
-## Overview
+## What changed
 
-The GPUmon client library enables CUDA applications to generate detailed GPU activity logs in NDJSON format. These logs are consumed by the GPUmon crawler/agent and sent to the backend for analysis.
+The client moved from a single-header to a multi-header layout to support multiple platforms and cleaner separation of concerns:
+- `gpumon/gpumon.hpp` — umbrella include that auto-selects a backend
+- `gpumon/core/common.hpp` — core types/utilities (logging, JSON helpers)
+- `gpumon/core/monitor.hpp` — public API (init/shutdown, ScopedMonitor, macros)
+- `gpumon/backends/cuda.hpp` — CUDA-specific helpers and launch macros
+
+You should include only `gpumon/gpumon.hpp` in application code.
 
 ## Features
 
-- **Header-only**: Single header file, no compilation required
-- **NDJSON logging**: One event per line, easy to parse
-- **Kernel monitoring**: Automatic timing and configuration logging
-- **Thread-safe**: Safe to use in multi-threaded applications
-- **Minimal overhead**: Low-impact instrumentation
-- **Cross-platform**: Windows and Linux support
+- Header-only, zero link-time cost
+- NDJSON logging, one event per line
+- Scoped monitoring with optional periodic GPU memory sampling
+- CUDA kernel auto-timing macros (sync for now)
+- Thread-safe logging
+- Cross-platform (Windows/Linux) for CUDA; backend abstraction for future platforms
+
+## Backends and auto-detection
+
+- CUDA is picked automatically if compiling with NVCC (`__CUDACC__`).
+- To force-select, define one of:
+  - `GPUMON_BACKEND_CUDA`
+  - `GPUMON_BACKEND_OPENCL` (not yet implemented; will error if selected)
 
 ## Quick Start
 
-### 1. Include the header
+### 1) Include
 
 ```cpp
 #include <gpumon/gpumon.hpp>
 ```
 
-### 2. Initialize GPUmon
+### 2) Initialize and Shutdown
 
 ```cpp
 int main() {
     gpumon::InitOptions opts;
     opts.appName = "my_cuda_app";
-    opts.logFilePath = "gpumon.log";
-    
-    if (!gpumon::init(opts)) {
-        std::cerr << "Failed to initialize gpumon" << std::endl;
-        return 1;
-    }
-    
-    // Your application code here...
-    
+    opts.logFilePath = "gpumon.log";    // leave empty to use GPUMON_LOG_DIR
+    opts.sampleIntervalMs = 0;           // >0 enables periodic memory sampling in scopes
+
+    gpumon::init(opts);
+
+    // ... your code ...
+
     gpumon::shutdown();
-    return 0;
 }
 ```
 
-### 3. Wrap kernel launches
+Environment support:
+- `GPUMON_LOG_DIR` — if `logFilePath` is empty, the log path becomes `GPUMON_LOG_DIR/gpumon_<app>_<pid>.log`.
 
-Replace:
+### 3) Monitor work
+
+- Block-style scope with automatic begin/sample/end events:
+
 ```cpp
-myKernel<<<grid, block, sharedMem, stream>>>(args...);
+GPUMON_SCOPE("training-epoch") {
+    // launch kernels, do work...
+}
 ```
 
-With:
+- RAII object (equivalent):
+
 ```cpp
-GPUMON_LAUNCH(myKernel, grid, block, sharedMem, stream, args...);
+{
+    gpumon::ScopedMonitor m{"stage-1"};
+    // work...
+}
 ```
 
-## API Reference
+- Functional helper:
 
-### Initialization
+```cpp
+gpumon::monitor("data-load", [&]{
+    // work...
+});
+```
+
+- CUDA kernel macro with auto-timing (synchronous for now):
+
+```cpp
+GPUMON_LAUNCH(MyKernel, grid, block, sharedMemBytes, stream, arg1, arg2);
+// Also available: GPUMON_LAUNCH_TAGGED("tag", MyKernel, ...)
+```
+
+## Public API (summary)
 
 ```cpp
 namespace gpumon {
+  struct InitOptions {
+    std::string appName;
+    std::string logFilePath;   // empty -> use GPUMON_LOG_DIR
+    uint32_t    sampleIntervalMs = 0; // background memory sampling period for scopes (0 = off)
+  };
 
-struct InitOptions {
-    std::string appName;      // Application identifier
-    std::string logFilePath;  // Path to NDJSON log file
-};
+  bool init(const InitOptions&);
+  void shutdown();
 
-bool init(const InitOptions& opts);
-void shutdown();
-
+  class ScopedMonitor { /* RAII scope begin/sample/end */ };
+  void monitor(const std::string& name, const std::function<void()>& fn, const std::string& tag = "");
 }
+
+// Macros (core):
+//   GPUMON_SCOPE(name)
+//   GPUMON_SCOPE_TAGGED(name, tag)
+
+// Macros (CUDA backend):
+//   GPUMON_LAUNCH(kernel, grid, block, sharedMem, stream, ...)
+//   GPUMON_LAUNCH_TAGGED(tag, kernel, grid, block, sharedMem, stream, ...)
 ```
 
-**init()** - Initializes the logging system
-- Opens the log file in append mode
-- Writes an initialization event
-- Returns `true` on success, `false` on failure
+Notes:
+- `GPUMON_SCOPE` optionally samples GPU memory periodically if `sampleIntervalMs > 0` in `InitOptions`.
+- Scope end will call the backend `synchronize()` to ensure timing covers in-flight GPU work.
 
-**shutdown()** - Closes the logging system
-- Writes a shutdown event
-- Closes the log file
-- Safe to call multiple times
+## NDJSON events
 
-### Region Marking
+One JSON object per line (NDJSON). Key event types:
 
-```cpp
-void beginRegion(const std::string& name);
-void endRegion();
-```
-
-Mark logical regions in your code (e.g., training epochs, processing phases).
-
-Example:
-```cpp
-gpumon::beginRegion("epoch_1");
-// ... multiple kernel launches ...
-gpumon::endRegion();
-```
-
-### Kernel Launch Macro
-
-```cpp
-GPUMON_LAUNCH(kernel, grid, block, sharedMem, stream, ...)
-```
-
-**Parameters:**
-- `kernel` - Kernel function name
-- `grid` - Grid dimensions (dim3)
-- `block` - Block dimensions (dim3)
-- `sharedMem` - Shared memory bytes (size_t)
-- `stream` - CUDA stream (cudaStream_t, use 0 for default)
-- `...` - Kernel arguments
-
-**Behavior:**
-1. Captures start timestamp
-2. Launches the kernel
-3. Calls `cudaGetLastError()`
-4. Calls `cudaDeviceSynchronize()` (blocking)
-5. Captures end timestamp
-6. Logs the event in NDJSON format
-
-**Note:** In v0.1, the macro performs synchronous execution for simplicity.
-
-## NDJSON Log Format
-
-Each log entry is a single JSON object per line.
-
-### Initialization Event
+- Initialization
 
 ```json
 {
   "type": "init",
   "pid": 1234,
   "app": "my_cuda_app",
+  "logPath": "gpumon.log",
   "ts_ns": 1731958400123456
 }
 ```
 
-### Kernel Event
+- Scope lifecycle (begin, sample, end). Examples (two lines shown as text to illustrate NDJSON):
+
+```text
+{"type":"scope_begin","pid":1234,"app":"my_cuda_app","name":"epoch_1","ts_ns":1731958400123456,"memory":[{"device":0,"used_mib":1024,"free_mib":8192,"total_mib":9216}]}
+{"type":"scope_sample","pid":1234,"app":"my_cuda_app","name":"epoch_1","ts_ns":1731958401123456,"memory":[{"device":0,"used_mib":1100,"free_mib":8116,"total_mib":9216}]}
+```
+
+- Scope end includes full timing and final memory snapshot:
+
+```json
+{
+  "type": "scope_end",
+  "pid": 1234,
+  "app": "my_cuda_app",
+  "name": "epoch_1",
+  "ts_start_ns": 1731958400123456,
+  "ts_end_ns":   1731958403123456,
+  "duration_ns": 3000000,
+  "memory": [{"device":0, "used_mib":1110, "free_mib":8106, "total_mib":9216}]
+}
+```
+
+- CUDA kernel event (from `GPUMON_LAUNCH`):
 
 ```json
 {
@@ -147,7 +167,8 @@ Each log entry is a single JSON object per line.
   "app": "my_cuda_app",
   "kernel": "vectorAdd",
   "ts_start_ns": 1731958400123456,
-  "ts_end_ns": 1731958400126789,
+  "ts_end_ns":   1731958400126789,
+  "duration_ns": 3333,
   "grid": [128, 1, 1],
   "block": [256, 1, 1],
   "shared_mem_bytes": 0,
@@ -155,271 +176,136 @@ Each log entry is a single JSON object per line.
 }
 ```
 
-**Fields:**
-- `type` - Event type ("kernel")
-- `pid` - Process ID
-- `app` - Application name from InitOptions
-- `kernel` - Kernel function name
-- `ts_start_ns` - Start timestamp (nanoseconds, monotonic clock)
-- `ts_end_ns` - End timestamp (nanoseconds, monotonic clock)
-- `grid` - Grid dimensions [x, y, z]
-- `block` - Block dimensions [x, y, z]
-- `shared_mem_bytes` - Shared memory allocation
-- `cuda_error` - CUDA error string (if any)
-
-### Region Events
-
-```json
-{"type":"region_begin","pid":1234,"app":"my_cuda_app","name":"epoch_1","ts_ns":1731958400123456}
-{"type":"region_end","pid":1234,"app":"my_cuda_app","ts_ns":1731958400126789}
-```
-
-### Shutdown Event
+- Shutdown
 
 ```json
 {
   "type": "shutdown",
   "pid": 1234,
   "app": "my_cuda_app",
-  "ts_ns": 1731958400123456
+  "ts_ns": 1731958404123456
 }
 ```
 
-## Complete Example
+## End-to-end example
 
 ```cpp
 #include <gpumon/gpumon.hpp>
-#include <iostream>
+#include <cuda_runtime.h>
 
 __global__
 void vectorAdd(int* a, int* b, int* c, int n) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
-        c[idx] = a[idx] + b[idx];
-    }
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) c[i] = a[i] + b[i];
 }
 
 int main() {
-    // Initialize GPUmon
-    gpumon::InitOptions opts;
-    opts.appName = "vector_add_demo";
-    opts.logFilePath = "gpumon.log";
-    
-    if (!gpumon::init(opts)) {
-        std::cerr << "Failed to initialize gpumon" << std::endl;
-        return 1;
-    }
-    
-    // Allocate memory
-    const int n = 1024;
-    int *d_a, *d_b, *d_c;
-    cudaMalloc(&d_a, n * sizeof(int));
-    cudaMalloc(&d_b, n * sizeof(int));
-    cudaMalloc(&d_c, n * sizeof(int));
-    
-    // Launch kernel with monitoring
-    dim3 grid(4);
-    dim3 block(256);
-    GPUMON_LAUNCH(vectorAdd, grid, block, 0, 0, d_a, d_b, d_c, n);
-    
-    // Cleanup
-    cudaFree(d_a);
-    cudaFree(d_b);
-    cudaFree(d_c);
-    
-    gpumon::shutdown();
-    return 0;
+  gpumon::InitOptions opts;
+  opts.appName = "vector_add_demo";
+  opts.logFilePath = "gpumon.log";
+  opts.sampleIntervalMs = 5; // try periodic sampling inside scopes
+
+  gpumon::init(opts);
+
+  dim3 grid(4), block(256);
+  int *a, *b, *c; // assume allocated/initialized
+  // ... allocate and copy ...
+
+  // Monitor a phase
+  GPUMON_SCOPE("phase-1") {
+    vectorAdd<<<grid, block>>>(a, b, c, 1024);
+    cudaDeviceSynchronize();
+  }
+
+  // Kernel timing (sync)
+  GPUMON_LAUNCH(vectorAdd, grid, block, 0, 0, a, b, c, 1024);
+
+  gpumon::shutdown();
 }
 ```
 
-## CMake Integration
+## CMake integration
 
-### Method 1: FetchContent (Recommended)
+The library is header-only. Target name is `gpumon::gpumon`.
 
-The easiest way to integrate GPUmon into your project:
+### Option A: add_subdirectory
 
 ```cmake
-cmake_minimum_required(VERSION 3.18)
-project(my_cuda_app LANGUAGES CXX CUDA)
+add_subdirectory(path/to/gpumon/gpumon_client)
 
+add_executable(my_app main.cu)
+target_link_libraries(my_app PRIVATE gpumon::gpumon)
+set_target_properties(my_app PROPERTIES
+  CUDA_SEPARABLE_COMPILATION ON
+  CUDA_STANDARD 17)
+```
+
+### Option B: FetchContent
+
+```cmake
 include(FetchContent)
-
-# Fetch gpumon_client from Git
 FetchContent_Declare(
-    gpumon_client
-    GIT_REPOSITORY https://github.com/your-org/gpumon.git
-    GIT_TAG        v0.1.0  # or main, or a specific commit
-    SOURCE_SUBDIR  clientlib
-)
-
+  gpumon_client
+  GIT_REPOSITORY https://github.com/your-org/gpumon.git
+  GIT_TAG        main
+  SOURCE_SUBDIR  gpumon_client)
 FetchContent_MakeAvailable(gpumon_client)
 
-# Your CUDA application
 add_executable(my_app main.cu)
-target_link_libraries(my_app PRIVATE gpumon::client)
-set_target_properties(my_app PROPERTIES
-    CUDA_STANDARD 17
-    CUDA_SEPARABLE_COMPILATION ON
-)
+target_link_libraries(my_app PRIVATE gpumon::gpumon)
 ```
 
-### Method 2: Git Submodule + add_subdirectory
-
-```bash
-# Add as submodule
-git submodule add https://github.com/your-org/gpumon.git external/gpumon
-git submodule update --init --recursive
-```
+### Option C: Installed package
 
 ```cmake
-cmake_minimum_required(VERSION 3.18)
-project(my_cuda_app LANGUAGES CXX CUDA)
-
-# Add gpumon_client
-add_subdirectory(external/gpumon/clientlib)
-
-# Your CUDA application
-add_executable(my_app main.cu)
-target_link_libraries(my_app PRIVATE gpumon::client)
-set_target_properties(my_app PROPERTIES
-    CUDA_STANDARD 17
-    CUDA_SEPARABLE_COMPILATION ON
-)
-```
-
-### Method 3: System Installation
-
-```bash
-# Install gpumon_client
-cd gpumon/clientlib
-mkdir build && cd build
-cmake -DCMAKE_INSTALL_PREFIX=/usr/local ..
-cmake --build .
-sudo cmake --install .
-```
-
-Then in your project:
-
-```cmake
-cmake_minimum_required(VERSION 3.18)
-project(my_cuda_app LANGUAGES CXX CUDA)
-
-# Find installed package
 find_package(gpumon_client 0.1 REQUIRED)
-
-# Your CUDA application
 add_executable(my_app main.cu)
-target_link_libraries(my_app PRIVATE gpumon::client)
-set_target_properties(my_app PROPERTIES
-    CUDA_STANDARD 17
-    CUDA_SEPARABLE_COMPILATION ON
-)
+target_link_libraries(my_app PRIVATE gpumon::gpumon)
 ```
 
-## Building the Example
-
-### Linux / macOS
+Install from this directory:
 
 ```bash
-mkdir build && cd build
-cmake ..
-cmake --build .
-
-# Run the example
-./clientlib/example/gpumon_example
-
-# View the logs
-cat gpumon.log
+cmake -S . -B build
+cmake --build build
+cmake --install build --prefix <dest>
 ```
 
-### Windows
+## Building the bundled example
 
-#### Using Visual Studio:
+From `gpumon_client` directory:
 
-```cmd
-mkdir build
-cd build
-cmake -G "Visual Studio 17 2022" -A x64 ..
-cmake --build . --config Release
+```bash
+cmake -S . -B build
+cmake --build build
+# Executable name may be gpumon_block_example
+``;
 
-REM Run the example
-clientlib\example\Release\gpumon_example.exe
+On Windows with VS Generator:
 
-REM View the logs
-type gpumon.log
+```bat
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release
 ```
 
-#### Using Ninja:
+## Performance notes
 
-```cmd
-mkdir build
-cd build
-cmake -G Ninja -DCMAKE_BUILD_TYPE=Release ..
-cmake --build .
+- `GPUMON_LAUNCH` performs a `cudaDeviceSynchronize()` to measure kernel duration; this is simpler but adds overhead.
+- Scoped monitoring calls backend `synchronize()` only when the scope ends to capture total work in the scope.
 
-REM Run the example
-clientlib\example\gpumon_example.exe
-
-REM View the logs
-type gpumon.log
-```
-
-## Thread Safety
-
-All public API functions are thread-safe:
-- Log writes are protected by a mutex
-- Safe to call from multiple threads
-- Safe to use with multi-stream CUDA applications
-
-## Performance Considerations
-
-**v0.1 Limitations:**
-- `GPUMON_LAUNCH` performs synchronous execution (`cudaDeviceSynchronize()`)
-- This blocks the CPU until kernel completion
-- Suitable for debugging and profiling, but adds overhead
-
-**Future versions** will support:
-- Asynchronous timing with CUDA events
-- Stream callbacks for non-blocking operation
-- Optional sync vs. async modes
-
-## Roadmap
-
-**v0.2:**
-- Asynchronous kernel timing with CUDA events
-- Python bindings
-- Configurable sync/async mode
-
-**v0.3:**
-- CUPTI-based automatic instrumentation
-- Memory transfer logging
-- GPU memory usage tracking
-
-**v1.0:**
-- Vulkan and Metal support
-- Network transport (optional direct-to-backend)
-- Advanced filtering and sampling
+Roadmap items include async timing via CUDA events and non-blocking instrumentation.
 
 ## Troubleshooting
 
-**Problem:** Log file is not created
+- No log file is produced
+  - Ensure the directory exists and the process can write there
+  - Try setting `GPUMON_LOG_DIR` or pass an absolute `logFilePath`
 
-**Solution:** Check that the directory exists and is writable. Use an absolute path.
+- CUDA compile errors about `dim3` or runtime headers
+  - Make sure the translation unit is compiled with NVCC and includes `<cuda_runtime.h>`
 
----
-
-**Problem:** Compilation errors about `dim3`
-
-**Solution:** Ensure you're compiling with NVCC and have included `<cuda_runtime.h>`.
-
----
-
-**Problem:** Undefined reference errors
-
-**Solution:** Make sure your file has `.cu` extension or use:
-```cmake
-set_target_properties(target PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-```
+- Link/undefined references
+  - This is header-only; usually indicates the file isn’t compiled as CUDA (`.cu`) when needed. Enable `CUDA_SEPARABLE_COMPILATION` or place CUDA code in `.cu` sources
 
 ## License
 
