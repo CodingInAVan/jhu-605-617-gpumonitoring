@@ -1,21 +1,19 @@
 cmake_minimum_required(VERSION 3.18)
 project(gpumon_client
     VERSION 0.1.0
-    LANGUAGES CXX
+    LANGUAGES CXX CUDA
     DESCRIPTION "Header-only GPU monitoring client library"
 )
 
-enable_language(CUDA)
 # Header-only library
-add_library(gpumon_client INTERFACE
-        include/gpumon/gpumon.hpp)
-add_library(gpumon::client ALIAS gpumon_client)
+add_library(gpumon INTERFACE)
 
-target_include_directories(gpumon_client INTERFACE
+target_include_directories(gpumon INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
-target_compile_features(gpumon_client INTERFACE cxx_std_17)
+target_compile_features(gpumon INTERFACE cxx_std_17)
+add_library(gpumon::gpumon ALIAS gpumon)
 
 # Optional: Build example
 option(BUILD_GPUMON_EXAMPLE "Build gpumon example application" ON)
@@ -33,7 +31,7 @@ install(DIRECTORY include/
 )
 
 # Install targets
-install(TARGETS gpumon_client
+install(TARGETS gpumon
     EXPORT gpumon_clientTargets
     INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
