@@ -1,27 +1,26 @@
 import React, { useEffect, useMemo, useState, useCallback } from 'react';
-import { fetchGpus, fetchMetrics, fetchProcessMetrics, mapItemsToSeries, getAuth, clearAuth } from './api.js';
-import MetricChart from './components/MetricChart.jsx';
-
-const METRICS = [
-  { key: 'utilization', label: 'Utilization', fields: ['gpuPercent', 'memoryPercent'], defaultField: 'gpuPercent' },
-  { key: 'memory', label: 'Memory', fields: ['usedMiB', 'freeMiB', 'totalMiB'], defaultField: 'usedMiB' },
-  { key: 'power', label: 'Power', fields: ['watts'], defaultField: 'watts' },
-  { key: 'temperature', label: 'Temperature', fields: ['celsius'], defaultField: 'celsius' },
-  { key: 'clocks', label: 'Clocks', fields: ['graphicsMHz', 'memoryMHz'], defaultField: 'graphicsMHz' },
-];
+import { fetchGpus, fetchProcessMetrics, getAuth, clearAuth } from './api.js';
+import SimpleTimelineTable from './components/SimpleTimelineTable.tsx';
+import PerformanceTable from './components/PerformanceTable.tsx';
+import { Tabs, Tab } from '@mui/material';
+import DetailDialog from './components/DetailDialog.tsx';
 
 export default function App() {
   const [gpus, setGpus] = useState([]);
   const [selectedGpuKey, setSelectedGpuKey] = useState(''); // prefer gpuId if present else hostname::gpuName
-  const [timeRange, setTimeRange] = useState('1h'); // 1h, 6h, 24h, 7d, 30d
+  const [timeRange, setTimeRange] = useState('1h'); // hour-level defaults: 1h, 2h, 6h, 12h, 24h
+  const [tab, setTab] = useState(0); // 0 = Timeline, 1 = Performance
 
-  const [metricsData, setMetricsData] = useState({}); // { [metricKey]: items[] }
   const [processMetrics, setProcessMetrics] = useState([]); // process metrics items
+  const [detailBar, setDetailBar] = useState(null);
+
+  // Performance filters
+  const [selectedApp, setSelectedApp] = useState('');
+  const [selectedTag, setSelectedTag] = useState('');
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [autoRefresh, setAutoRefresh] = useState(true);
-  const [intervalSec, setIntervalSec] = useState(5);
+  // Auto-refresh removed per request
 
   useEffect(() => {
     // load GPUs on mount
@@ -48,22 +47,20 @@ export default function App() {
 
     switch (timeRange) {
       case '1h':
-        start = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
+        start = new Date(now.getTime() - 1 * 60 * 60 * 1000).toISOString();
+        break;
+      case '2h':
+        start = new Date(now.getTime() - 2 * 60 * 60 * 1000).toISOString();
         break;
       case '6h':
         start = new Date(now.getTime() - 6 * 60 * 60 * 1000).toISOString();
         break;
+      case '12h':
+        start = new Date(now.getTime() - 12 * 60 * 60 * 1000).toISOString();
+        break;
       case '24h':
-        start = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
-        break;
-      case '7d':
-        start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
-        break;
-      case '30d':
-        start = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
-        break;
       default:
-        start = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
+        start = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
     }
 
     return { start, end };
@@ -75,29 +72,16 @@ export default function App() {
     try {
       const sel = gpus.find(g => (g.gpuId || `${g.hostname || ''}::${g.gpuName || ''}`) === selectedGpuKey);
       const { start, end } = getTimeRangeParams();
-      const baseParams = { start, end, limit: 10000, order: 'asc' };
+      // Shorter windows imply fewer items; keep reasonable cap
+      const baseParams = { start, end, limit: 5000, order: 'asc' };
       if (sel?.gpuId) baseParams.gpuId = sel.gpuId;
       else {
         if (sel?.hostname) baseParams.hostname = sel.hostname;
         if (sel?.gpuName) baseParams.gpuName = sel.gpuName;
       }
 
-      // Load all metrics and process metrics in parallel
-      const [metricResults, processData] = await Promise.all([
-        Promise.all(
-          METRICS.map(async (m) => {
-            const data = await fetchMetrics({ ...baseParams, metric: m.key });
-            return { key: m.key, items: data.items || [] };
-          })
-        ),
-        fetchProcessMetrics(baseParams)
-      ]);
-
-      const newMetricsData = {};
-      metricResults.forEach(r => {
-        newMetricsData[r.key] = r.items;
-      });
-      setMetricsData(newMetricsData);
+      // Load process events only (unified endpoint)
+      const processData = await fetchProcessMetrics(baseParams);
       setProcessMetrics(processData.items || []);
     } catch (e) {
       setError(String(e));
@@ -109,52 +93,79 @@ export default function App() {
   useEffect(() => {
     if (gpus.length === 0 || !selectedGpuKey) return;
     loadMetrics();
-    if (!autoRefresh) return;
-    const id = setInterval(loadMetrics, intervalSec * 1000);
-    return () => clearInterval(id);
-  }, [loadMetrics, autoRefresh, intervalSec, gpus.length, selectedGpuKey]);
+  }, [loadMetrics, gpus.length, selectedGpuKey]);
 
-  const palette = ['rgb(75, 192, 192)', 'rgb(255, 99, 132)', 'rgb(54, 162, 235)', 'rgb(255, 159, 64)', 'rgb(153, 102, 255)', 'rgb(201, 203, 207)', 'rgb(255, 205, 86)'];
-
-  const allChartsData = useMemo(() => {
-    return METRICS.map(m => {
-      const items = metricsData[m.key] || [];
-      const flds = m.fields || [];
-      const datasets = flds.map((f, i) => ({
-        label: `${f}`,
-        points: mapItemsToSeries(items, f),
-        color: palette[i % palette.length],
-      }));
-      return { metric: m, datasets };
-    });
-  }, [metricsData]);
-
-  const processChartData = useMemo(() => {
-    // Group process metrics by process name
-    const processGroups = {};
-    processMetrics.forEach(item => {
-      const procName = item.processName || `PID ${item.pid}`;
-      if (!processGroups[procName]) {
-        processGroups[procName] = [];
+  // Adapter: map backend items into MetricEvent shape used by visual components
+  const events = useMemo(() => {
+    const out = [];
+    for (const it of processMetrics || []) {
+      const payload = it.payload || {};
+      const type = it.type; // rely on backend-provided type directly
+      if (type !== 'kernel' && type !== 'scope_end' && type !== 'scope_begin' && type !== 'process_sample') {
+        continue;
       }
-      const timestamp = item.timestamp;
-      const ms = timestamp ? new Date(timestamp).getTime() : null;
-      const memory = item.usedMemoryMiB;
-      if (ms && typeof memory === 'number') {
-        processGroups[procName].push({ x: ms, y: memory });
-      }
-    });
-
-    // Create datasets for each process
-    const processNames = Object.keys(processGroups);
-    const datasets = processNames.map((name, i) => ({
-      label: name,
-      points: processGroups[name],
-      color: palette[i % palette.length],
-    }));
-
-    return datasets;
+      const name = payload.kernel || it.processName || payload.name || undefined;
+      const ev = {
+        timestamp: it.timestamp,
+        type,
+        pid: it.pid,
+        appName: it.app || payload.app || 'app',
+        tag: it.tag || payload.tag,
+        name,
+        usedMemoryMiB: it.usedMemoryMiB,
+        durationNs: it.durationNs,
+        tsStartNs: payload.ts_start_ns || it.tsStartNs,
+        tsEndNs: payload.ts_end_ns || it.tsEndNs,
+        gpuName: payload.gpuName || it.gpuName || payload.name || 'GPU',
+        uuid: it.gpuUuid || payload.gpuUuid || payload.uuid || 'unknown',
+        // include extra metadata from backend for detail view
+        extra: it.extra || payload,
+      };
+      out.push(ev);
+    }
+    return out;
   }, [processMetrics]);
+
+  // Program and Name options derived from current events
+  const programOptions = useMemo(() => {
+    const set = new Set(events.map(e => e.appName).filter(Boolean));
+    return Array.from(set).sort();
+  }, [events]);
+
+  const nameOptions = useMemo(() => {
+    // "Name" means tag selection as per previous grouping
+    const filtered = selectedApp ? events.filter(e => e.appName === selectedApp) : events;
+    const set = new Set(filtered.map(e => e.tag || 'default'));
+    return Array.from(set).sort();
+  }, [events, selectedApp]);
+
+  // Initialize/adjust selectedApp and selectedTag when options change
+  useEffect(() => {
+    if (!selectedApp && programOptions.length > 0) {
+      setSelectedApp(programOptions[0]);
+    } else if (selectedApp && !programOptions.includes(selectedApp)) {
+      setSelectedApp(programOptions[0] || '');
+    }
+  }, [programOptions, selectedApp]);
+
+  useEffect(() => {
+    if (!selectedTag && nameOptions.length > 0) {
+      setSelectedTag(nameOptions[0]);
+    } else if (selectedTag && !nameOptions.includes(selectedTag)) {
+      setSelectedTag(nameOptions[0] || '');
+    }
+  }, [nameOptions, selectedTag]);
+
+  const timeRangeMs = useMemo(() => {
+    switch (timeRange) {
+      case '1h': return 1 * 60 * 60 * 1000;
+      case '2h': return 2 * 60 * 60 * 1000;
+      case '6h': return 6 * 60 * 60 * 1000;
+      case '12h': return 12 * 60 * 60 * 1000;
+      case '24h':
+      default: return 24 * 60 * 60 * 1000;
+    }
+  }, [timeRange]);
 
   const auth = getAuth();
   return (
@@ -182,22 +193,30 @@ export default function App() {
           Time Range:
           <select value={timeRange} onChange={(e) => setTimeRange(e.target.value)} style={{ marginLeft: 6 }}>
             <option value="1h">Last 1 Hour</option>
+            <option value="2h">Last 2 Hours</option>
             <option value="6h">Last 6 Hours</option>
+            <option value="12h">Last 12 Hours</option>
             <option value="24h">Last 24 Hours</option>
-            <option value="7d">Last 7 Days</option>
-            <option value="30d">Last 30 Days</option>
           </select>
         </label>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} /> Auto refresh
+        {/* Performance filters moved to top as requested */}
+        <label>
+          Program:
+          <select value={selectedApp} onChange={(e) => setSelectedApp(e.target.value)} style={{ marginLeft: 6 }}>
+            {programOptions.map((opt) => (
+              <option key={opt} value={opt}>{opt}</option>
+            ))}
+          </select>
         </label>
         <label>
-          Every:
-          <input type="number" min={1} max={60} step={1} value={intervalSec} onChange={(e) => setIntervalSec(Number(e.target.value))} style={{ width: 60, marginLeft: 6 }} /> sec
+          Name:
+          <select value={selectedTag} onChange={(e) => setSelectedTag(e.target.value)} style={{ marginLeft: 6 }}>
+            {nameOptions.map((opt) => (
+              <option key={opt} value={opt}>{opt}</option>
+            ))}
+          </select>
         </label>
-        <button onClick={loadMetrics} disabled={loading}>
-          {loading ? 'Loading…' : 'Refresh'}
-        </button>
+        {/* Auto-refresh and manual refresh removed per request */}
       </div>
 
       {error && (
@@ -206,30 +225,35 @@ export default function App() {
         </div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(450px, 1fr))', gap: 16 }}>
-        {allChartsData.map(({ metric, datasets }) => (
-          <div key={metric.key} style={{ border: '1px solid #ddd', borderRadius: 6, padding: 12 }}>
-            <h3 style={{ margin: '0 0 12px 0', fontSize: 16 }}>{metric.label}</h3>
-            <MetricChart datasets={datasets} label={metric.label} />
-          </div>
-        ))}
-
-        {/* Process Memory Chart */}
-        <div style={{ border: '1px solid #ddd', borderRadius: 6, padding: 12 }}>
-          <h3 style={{ margin: '0 0 12px 0', fontSize: 16 }}>Process Memory Usage</h3>
-          {processChartData.length > 0 ? (
-            <MetricChart datasets={processChartData} label="Memory (MiB)" />
-          ) : (
-            <div style={{ height: '400px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#999' }}>
-              No process data available
-            </div>
+      <div style={{ border: '1px solid #ddd', borderRadius: 6 }}>
+        <Tabs value={tab} onChange={(_, v) => setTab(v)} aria-label="Views" variant="fullWidth">
+          <Tab label="Timeline" />
+          <Tab label="Performance" />
+        </Tabs>
+        <div style={{ padding: 12 }}>
+          {tab === 0 && (
+            <SimpleTimelineTable
+              events={events}
+              timeRangeMs={timeRangeMs}
+              onBarClick={(bar) => setDetailBar(bar)}
+            />
+          )}
+          {tab === 1 && (
+            <PerformanceTable
+              events={events}
+              timeRangeMs={timeRangeMs}
+              appFilter={selectedApp}
+              tagFilter={selectedTag}
+            />
           )}
         </div>
       </div>
 
       <div style={{ marginTop: 12, fontSize: 12, color: '#666' }}>
-        Backend is Spring Boot at http://localhost:8080 (proxied as /api). Endpoints used: GET /metrics, GET /health.
+        Backend is Spring Boot at http://localhost:8080 (proxied as /api). Endpoint used: GET /metrics.
       </div>
+
+      <DetailDialog open={!!detailBar} bar={detailBar} onClose={() => setDetailBar(null)} />
     </div>
   );
 }

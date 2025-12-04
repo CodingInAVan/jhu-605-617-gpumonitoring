@@ -65,7 +65,7 @@ option(BUILD_TESTS "Build tests" OFF)
 
 # Add subdirectories
 if(BUILD_CLIENTLIB)
-    add_subdirectory(clientlib)
+    add_subdirectory(gpumon_client)
 endif()
 
 if(BUILD_CRAWLER)
