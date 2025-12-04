@@ -187,6 +187,23 @@ One JSON object per line (NDJSON). Key event types:
 }
 ```
 
+## Data flow and schema (client → crawler → backend)
+
+GPUmon client does not send data to your backend directly. Its sole responsibility is to write NDJSON log lines to a file.
+
+- Client output: NDJSON log file written by the target process.
+  - Location is either the explicit InitOptions::logFilePath you provide, or
+  - If logFilePath is empty and GPUMON_LOG_DIR is set, the file is written as GPUMON_LOG_DIR/gpumon_<app>_<pid>.log.
+- Crawler: A separate gpumon/crawler component is responsible for:
+  - Discovering client log files (watching GPUMON_LOG_DIR or configured paths)
+  - Validating each NDJSON line against the schema
+  - Forwarding well-formed events to your backend/metrics pipeline
+- Schema location: gpumon_client/schema contains both human-readable docs and a machine-readable JSON Schema.
+  - gpumon_client/schema/README.md — event shapes, examples, notes
+  - gpumon_client/schema/ndjson.schema.json — JSON Schema (draft‑07) using oneOf on the "type" field
+
+This separation lets you deploy the lightweight header-only client anywhere, while evolving ingestion/transport inside the crawler without touching application code.
+
 ## End-to-end example
 
 ```cpp

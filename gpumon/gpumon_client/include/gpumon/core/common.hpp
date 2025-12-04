@@ -30,18 +30,17 @@ namespace gpumon {
     };
 
     namespace detail {
+        // Snapshot of Device State (Identity + Memory)
+        struct DeviceSnapshot {
+            int deviceId = 0;
+            std::string name;
+            std::string uuid; // Extracted via Runtime API
+            int pciBusId = 0;
 
-        // Unified memory snapshot structure for all backends
-        struct MemorySnapshot {size_t freeMiB = 0;
+            size_t freeMiB = 0;
             size_t totalMiB = 0;
             size_t usedMiB = 0;
-            int deviceId = 0;
-            bool valid = false;
         };
-
-        // ============================================================================
-        // Internal State (Singleton)
-        // ============================================================================
 
         struct State {
             std::string appName;
@@ -63,10 +62,6 @@ namespace gpumon {
             static std::mutex m;
             return m;
         }
-
-        // ============================================================================
-        // Platform Utilities
-        // ============================================================================
 
         inline int32_t getPid() {
         #ifdef _WIN32
@@ -108,11 +103,6 @@ namespace gpumon {
                 switch (c) {
                     case '"':  oss << "\\\""; break;
                     case '\\': oss << "\\\\"; break;
-                    case '\b': oss << "\\b"; break;
-                    case '\f': oss << "\\f"; break;
-                    case '\n': oss << "\\n"; break;
-                    case '\r': oss << "\\r"; break;
-                    case '\t': oss << "\\t"; break;
                     default:   oss << c; break;
                 }
             }
@@ -130,16 +120,19 @@ namespace gpumon {
         }
 
         // Helper to format the memory array into JSON
-        inline void writeMemoryJson(std::ostringstream& oss, const std::vector<MemorySnapshot>& snapshots) {
+        inline void writeDeviceJson(std::ostringstream& oss, const std::vector<DeviceSnapshot>& snapshots) {
             if (snapshots.empty()) return;
-            oss << ",\"memory\":[";
+            oss << ",\"devices\":[";
             for (size_t i = 0; i < snapshots.size(); ++i) {
                 if (i > 0) oss << ",";
-                const auto& mem = snapshots[i];
-                oss << "{\"device\":" << mem.deviceId
-                    << ",\"used_mib\":" << mem.usedMiB
-                    << ",\"free_mib\":" << mem.freeMiB
-                    << ",\"total_mib\":" << mem.totalMiB
+            const auto& s = snapshots[i];
+                oss << "{\"id\":" << s.deviceId
+                    << ",\"name\":\"" << escapeJson(s.name) << "\""
+                    << ",\"uuid\":\"" << s.uuid << "\""
+                    << ",\"pci_bus\":" << s.pciBusId
+                    << ",\"used_mib\":" << s.usedMiB
+                    << ",\"free_mib\":" << s.freeMiB
+                    << ",\"total_mib\":" << s.totalMiB
                     << "}";
             }
             oss << "]";

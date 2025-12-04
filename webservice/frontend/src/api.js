@@ -18,29 +18,24 @@ function authHeaders() {
   return headers;
 }
 
-export async function fetchGpus() {
+export async function fetchGpus({ start = null, end = null } = {}) {
   const params = new URLSearchParams();
-  params.set('limit', '10000');
-  params.set('order', 'desc');
-  const res = await fetch(`${API_BASE}/metrics?${params.toString()}`, {
+  if (start) params.set('start', start);
+  if (end) params.set('end', end);
+  const res = await fetch(`${API_BASE}/gpus?${params.toString()}`, {
     headers: { ...authHeaders() },
   });
-  if (!res.ok) throw new Error(`Failed to fetch GPUs (via metrics): ${res.status}`);
+  if (!res.ok) throw new Error(`Failed to fetch GPUs: ${res.status}`);
   const data = await res.json();
-  const items = data?.items || [];
-  const map = new Map();
-  for (const it of items) {
-    const p = it?.payload || {};
-    const gpuId = p.gpuId || null;
-    const hostname = p.hostname || null;
-    const gpuName = p.gpuName || null;
-    const key = gpuId ?? `${hostname}::${gpuName}`;
-    if (!key) continue;
-    if (!map.has(key)) {
-      map.set(key, { gpuId, hostname, gpuName });
-    }
-  }
-  return { gpus: Array.from(map.values()) };
+  const list = Array.isArray(data?.gpus) ? data.gpus : [];
+  // Map backend fields (gpuUuid, gpuName, lastSeen) to frontend expectations
+  const gpus = list.map((g) => ({
+    gpuId: g.gpuUuid ?? null, // keep legacy name used by UI selection
+    gpuUuid: g.gpuUuid ?? null,
+    gpuName: g.gpuName ?? null,
+    lastSeen: g.lastSeen ?? null,
+  }));
+  return { gpus };
 }
 
 export async function fetchMetrics({ gpuId = null, hostname = null, gpuName = null, metric = null, start = null, end = null, limit = 500, order = 'asc', aggregate = null, field = null }) {
@@ -87,7 +82,7 @@ export function mapItemsToSeries(items, field) {
   const points = [];
   for (const it of items) {
     // Try to get value from payload first (for new consolidated format)
-    let v = it?.payload?.[field];
+    let v = it?.extra?.[field];
 
     // If not found in payload and field matches specific patterns, map to consolidated field names
     if (v === undefined || v === null) {
@@ -105,7 +100,7 @@ export function mapItemsToSeries(items, field) {
       };
 
       const mappedField = fieldMapping[field] || field;
-      v = it?.payload?.[mappedField];
+      v = it?.extra?.[mappedField];
 
       // Convert watts from milliwatts if needed
       if (field === 'watts' && mappedField === 'powerMilliwatts' && typeof v === 'number') {
@@ -113,9 +108,9 @@ export function mapItemsToSeries(items, field) {
       }
     }
 
-    const rawTs = it?.timestamp || it?.payload?.timestamp;
+    const rawTs = it?.timestamp || it?.extra?.timestamp;
     const ms = normalizeIsoToMsUtc(rawTs);
-    const processName = it?.payload?.processName;
+    const processName = it?.extra?.processName;
 
     if (typeof v === 'number' && ms !== null) {
       const point = { x: ms, y: v };
@@ -138,7 +133,8 @@ export async function fetchProcessMetrics({ gpuId = null, hostname = null, gpuNa
   if (end) params.set('end', end);
   params.set('limit', String(limit));
   params.set('order', order);
-  const res = await fetch(`${API_BASE}/process-metrics?${params.toString()}`, {
+  // In the new backend, process events are served via unified /metrics
+  const res = await fetch(`${API_BASE}/metrics?${params.toString()}`, {
     headers: { ...authHeaders() },
   });
   if (!res.ok) throw new Error(`Failed to fetch process metrics: ${res.status}`);

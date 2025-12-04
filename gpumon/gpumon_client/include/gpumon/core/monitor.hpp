@@ -92,9 +92,8 @@ namespace gpumon {
             if (!state.initialized) return;
 
             // 1. Log Scope Begin with initial snapshot
-            // GENERIC CALL to backend::get_memory_snapshots()
-            auto memSnapshots = backend::get_memory_snapshots();
-            logScopeEvent("scope_begin", tsStart_, memSnapshots);
+            auto snapshots = backend::get_device_snapshots();
+            logScopeEvent("scope_begin", tsStart_, snapshots);
 
             // 2. Start Background Sampler (if configured)
             if (state.sampleIntervalMs > 0) {
@@ -119,10 +118,10 @@ namespace gpumon {
             int64_t tsEnd = detail::getTimestampNs();
 
             // 3. Take Final Snapshot
-            auto memSnapshots = backend::get_memory_snapshots();
+            auto snapshots = backend::get_device_snapshots();
 
             // 4. Log Scope End
-            logScopeEvent("scope_end", tsEnd, memSnapshots, tsStart_);
+            logScopeEvent("scope_end", tsEnd, snapshots, tsStart_);
         }
 
         // Disable copy/move
@@ -138,9 +137,9 @@ namespace gpumon {
         std::thread samplerThread_;
 
         // Helper to format and write the JSON
-        void logScopeEvent(const char* type, int64_t timestamp,
-                      const std::vector<detail::MemorySnapshot>& snapshots,
-                      int64_t startTime = 0) {
+        void logScopeEvent(const char* type, const int64_t timestamp,
+                      const std::vector<detail::DeviceSnapshot>& snapshots,
+                      const int64_t startTime = 0) {
 
             const auto& state = detail::getState();
             std::ostringstream oss;
@@ -162,7 +161,7 @@ namespace gpumon {
                 oss << ",\"ts_ns\":" << timestamp;
             }
 
-            detail::writeMemoryJson(oss, snapshots);
+            detail::writeDeviceJson(oss, snapshots);
             oss << "}";
 
             detail::writeLogLine(oss.str());
@@ -174,11 +173,11 @@ namespace gpumon {
                 std::this_thread::sleep_for(std::chrono::milliseconds(intervalMs));
                 if (stopSampling_) break;
                 // GENERIC CALL to backend
-                auto memSnapshots = backend::get_memory_snapshots();
+                auto snapshots = backend::get_device_snapshots();
 
                 int64_t now = detail::getTimestampNs();
 
-                logScopeEvent("scope_sample", now, memSnapshots);
+                logScopeEvent("scope_sample", now, snapshots);
             }
         }
     };
