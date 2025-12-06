@@ -182,6 +182,58 @@ namespace gpumon {
         }
     };
 
+    // ============================================================================
+    // System Monitor
+    // ============================================================================
+    class SystemMonitor {
+    public:
+        explicit SystemMonitor(uint32_t intervalMs = 1000)
+            : intervalMs_(intervalMs), stop_(false) {
+
+            worker_ = std::thread(&SystemMonitor::loop, this);
+        }
+        void await() {
+            if (worker_.joinable()) {
+                worker_.join();
+            }
+        }
+
+        ~SystemMonitor() {
+            stop_ = true;
+            if (worker_.joinable()) worker_.join();
+        }
+
+    private:
+        uint32_t intervalMs_;
+        std::atomic<bool> stop_;
+        std::thread worker_;
+        std::string name_ = "system";
+
+        void loop() {
+            while (!stop_) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(intervalMs_));
+                if (stop_) break;
+
+                auto snapshots = backend::get_device_snapshots();
+
+                int64_t now = detail::getTimestampNs();
+                const auto& state = detail::getState();
+
+                std::ostringstream oss;
+                oss << "{\"type\":\"system_sample\","
+                    << R"("app":")" << detail::escapeJson(state.appName) << "\","
+                    << R"("name":")" << detail::escapeJson(name_) << "\","
+                    << "\"ts_ns\":" << now;
+
+                detail::writeDeviceJson(oss, snapshots);
+                oss << "}";
+
+                detail::writeLogLine(oss.str());
+            }
+        }
+    };
+
+
     inline void monitor(const std::string& name, const std::function<void()> &fn, const std::string& tag = "") {
         ScopedMonitor monitor(name, tag);
         fn();
@@ -198,3 +250,7 @@ if (gpumon::ScopedMonitor _gpumon_scope{name}; true)
 #define GPUMON_SCOPE_TAGGED(name, tag) \
 if (gpumon::ScopedMonitor _gpumon_scope{name, tag}; true)
 #endif
+
+#define GPUMON_SYSTEM_START(interval) \
+gpumon::SystemMonitor _sys_mon{interval}; \
+while(true) { std::this_thread::sleep_for(std::chrono::seconds(1)); }

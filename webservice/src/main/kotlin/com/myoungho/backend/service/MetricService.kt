@@ -218,6 +218,13 @@ class MetricService(
                     usedMiB = d.get("used_mib")?.asInt(),
                     freeMiB = d.get("free_mib")?.asInt(),
                     totalMiB = d.get("total_mib")?.asInt(),
+                    utilGpu = d.get("util_gpu")?.asInt(),
+                    utilMem = d.get("util_mem")?.asInt(),
+                    tempC = d.get("temp_c")?.asInt(),
+                    powerMw = d.get("power_mw")?.asInt(),
+                    clkGfx = d.get("clk_gfx")?.asInt(),
+                    clkSm = d.get("clk_sm")?.asInt(),
+                    clkMem = d.get("clk_mem")?.asInt(),
                 )
                 devicesToAttach.add(md)
                 idx += 1
@@ -239,6 +246,13 @@ class MetricService(
                     usedMiB = null,
                     freeMiB = null,
                     totalMiB = null,
+                    utilGpu = null,
+                    utilMem = null,
+                    tempC = null,
+                    powerMw = null,
+                    clkGfx = null,
+                    clkSm = null,
+                    clkMem = null,
                 )
                 devicesToAttach.add(md)
             }
@@ -342,6 +356,27 @@ class MetricService(
         }
         // expose first device convenience fields for compatibility
         val firstDev = e.devices.minByOrNull { it.idx ?: Int.MAX_VALUE }
+        val devicesOut = e.devices
+            .sortedBy { it.idx ?: Int.MAX_VALUE }
+            .map { d ->
+                mapOf(
+                    "id" to d.deviceId,
+                    "uuid" to d.gpuUuid,
+                    "name" to d.gpuName,
+                    "pci_bus" to d.pciBus,
+                    "used_mib" to d.usedMiB,
+                    "free_mib" to d.freeMiB,
+                    "total_mib" to d.totalMiB,
+                    "util_gpu" to d.utilGpu,
+                    "util_mem" to d.utilMem,
+                    "temp_c" to d.tempC,
+                    "power_mw" to d.powerMw,
+                    "clk_gfx" to d.clkGfx,
+                    "clk_sm" to d.clkSm,
+                    "clk_mem" to d.clkMem,
+                )
+            }
+
         return mapOf(
             "id" to e.id,
             // expose event type so frontend can distinguish scope/kernel/sample
@@ -358,6 +393,8 @@ class MetricService(
             "usedMemoryMiB" to firstDev?.usedMiB,
             // Keep original field name for consumers
             "extra" to payloadMap,
+            // Include devices list for frontend to show per-device metrics
+            "devices" to devicesOut,
             // Back-compat alias expected by some tests/clients
             "payload" to payloadMap,
         )

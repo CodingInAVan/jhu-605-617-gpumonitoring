@@ -22,7 +22,7 @@ export function buildTimelineData(
     const tEnd = new Date(ev.timestamp).getTime();
     if (!Number.isFinite(tEnd)) continue;
 
-    if (ev.type === 'process_sample') {
+    if (ev.type === 'process_sample' || ev.type === 'system_sample') {
       const key = `${ev.appName}|${ev.pid}|${safeTag(ev.tag)}`;
       let track = tracksMap.get(key);
       if (!track) {
@@ -36,7 +36,13 @@ export function buildTimelineData(
         };
         tracksMap.set(key, track);
       }
-      const used = typeof ev.usedMemoryMiB === 'number' ? ev.usedMemoryMiB : null;
+      let used: number | null = null;
+      if (typeof ev.usedMemoryMiB === 'number') {
+        used = ev.usedMemoryMiB;
+      } else if (Array.isArray(ev.devices) && ev.devices.length > 0) {
+        used = ev.devices.reduce((acc, d) => acc + (typeof d.used_mib === 'number' ? d.used_mib : 0), 0);
+        if (!Number.isFinite(used) || used <= 0) used = null;
+      }
       if (used !== null) {
         track.samples.push({ t: tEnd, v: used });
       }

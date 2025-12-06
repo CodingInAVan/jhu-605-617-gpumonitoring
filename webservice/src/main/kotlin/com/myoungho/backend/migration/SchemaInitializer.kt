@@ -59,6 +59,13 @@ class SchemaInitializer(
                   used_mib INTEGER,
                   free_mib INTEGER,
                   total_mib INTEGER,
+                  util_gpu INTEGER,
+                  util_mem INTEGER,
+                  temp_c INTEGER,
+                  power_mw INTEGER,
+                  clk_gfx INTEGER,
+                  clk_sm INTEGER,
+                  clk_mem INTEGER,
                   FOREIGN KEY(metric_id) REFERENCES metrics(id) ON DELETE CASCADE
                 )
                 """

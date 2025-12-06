@@ -12,7 +12,9 @@ interface MetricRepository : JpaRepository<MetricEntity, Long> {
         """
         SELECT DISTINCT p FROM MetricEntity p
         LEFT JOIN FETCH p.devices d
-        WHERE (:gpuUuid IS NULL OR d.gpuUuid = :gpuUuid)
+        WHERE (:gpuUuid IS NULL OR EXISTS (
+            SELECT 1 FROM MetricDeviceEntity dd WHERE dd.metric = p AND dd.gpuUuid = :gpuUuid
+        ))
         AND (:app IS NULL OR p.app = :app)
         AND (:tag IS NULL OR p.tag = :tag)
         AND (:start IS NULL OR p.timestamp >= :start)
@@ -34,7 +36,9 @@ interface MetricRepository : JpaRepository<MetricEntity, Long> {
         """
         SELECT DISTINCT p FROM MetricEntity p
         LEFT JOIN FETCH p.devices d
-        WHERE (:gpuUuid IS NULL OR d.gpuUuid = :gpuUuid)
+        WHERE (:gpuUuid IS NULL OR EXISTS (
+            SELECT 1 FROM MetricDeviceEntity dd WHERE dd.metric = p AND dd.gpuUuid = :gpuUuid
+        ))
         AND (:app IS NULL OR p.app = :app)
         AND (:tag IS NULL OR p.tag = :tag)
         AND (:start IS NULL OR p.timestamp >= :start)

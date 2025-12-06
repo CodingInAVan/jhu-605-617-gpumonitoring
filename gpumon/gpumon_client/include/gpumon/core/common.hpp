@@ -40,6 +40,14 @@ namespace gpumon {
             size_t freeMiB = 0;
             size_t totalMiB = 0;
             size_t usedMiB = 0;
+
+            unsigned int gpuUtil = 0;      // %
+            unsigned int memUtil = 0;      // %
+            unsigned int tempC = 0;        // Celsius
+            unsigned int powermW = 0;      // Milliwatts
+            unsigned int clockGfx = 0;     // MHz
+            unsigned int clockSm = 0;      // MHz
+            unsigned int clockMem = 0;     // MHz
         };
 
         struct State {
@@ -133,6 +141,13 @@ namespace gpumon {
                     << ",\"used_mib\":" << s.usedMiB
                     << ",\"free_mib\":" << s.freeMiB
                     << ",\"total_mib\":" << s.totalMiB
+                    << ",\"util_gpu\":" << s.gpuUtil
+                    << ",\"util_mem\":" << s.memUtil
+                    << ",\"temp_c\":" << s.tempC
+                    << ",\"power_mw\":" << s.powermW
+                    << ",\"clk_gfx\":" << s.clockGfx
+                    << ",\"clk_sm\":" << s.clockSm
+                    << ",\"clk_mem\":" << s.clockMem
                     << "}";
             }
             oss << "]";

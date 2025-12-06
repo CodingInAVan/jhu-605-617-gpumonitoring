@@ -4,6 +4,7 @@ import SimpleTimelineTable from './components/SimpleTimelineTable.tsx';
 import PerformanceTable from './components/PerformanceTable.tsx';
 import { Tabs, Tab } from '@mui/material';
 import DetailDialog from './components/DetailDialog.tsx';
+import MetricChart from './components/MetricChart.jsx';
 
 export default function App() {
   const [gpus, setGpus] = useState([]);
@@ -101,10 +102,29 @@ export default function App() {
     for (const it of processMetrics || []) {
       const payload = it.payload || {};
       const type = it.type; // rely on backend-provided type directly
-      if (type !== 'kernel' && type !== 'scope_end' && type !== 'scope_begin' && type !== 'process_sample') {
+      if (type !== 'kernel' && type !== 'scope_end' && type !== 'scope_begin' && type !== 'scope_sample' && type !== 'process_sample' && type !== 'system_sample') {
         continue;
       }
       const name = payload.kernel || it.processName || payload.name || undefined;
+      // Normalize devices from backend (snake_case fields)
+      const rawDevices = Array.isArray(it.devices) ? it.devices : (Array.isArray(payload.devices) ? payload.devices : []);
+      const devices = rawDevices.map((d) => ({
+        id: d.id,
+        uuid: d.uuid,
+        name: d.name,
+        pci_bus: d.pci_bus,
+        used_mib: d.used_mib,
+        free_mib: d.free_mib,
+        total_mib: d.total_mib,
+        util_gpu: d.util_gpu,
+        util_mem: d.util_mem,
+        temp_c: d.temp_c,
+        power_mw: d.power_mw,
+        clk_gfx: d.clk_gfx,
+        clk_sm: d.clk_sm,
+        clk_mem: d.clk_mem,
+      }));
+      const sumUsedFromDevices = devices.length ? devices.reduce((acc, d) => acc + (typeof d.used_mib === 'number' ? d.used_mib : 0), 0) : undefined;
       const ev = {
         timestamp: it.timestamp,
         type,
@@ -112,12 +132,13 @@ export default function App() {
         appName: it.app || payload.app || 'app',
         tag: it.tag || payload.tag,
         name,
-        usedMemoryMiB: it.usedMemoryMiB,
+        usedMemoryMiB: (typeof sumUsedFromDevices === 'number' && sumUsedFromDevices > 0) ? sumUsedFromDevices : it.usedMemoryMiB,
         durationNs: it.durationNs,
         tsStartNs: payload.ts_start_ns || it.tsStartNs,
         tsEndNs: payload.ts_end_ns || it.tsEndNs,
         gpuName: payload.gpuName || it.gpuName || payload.name || 'GPU',
         uuid: it.gpuUuid || payload.gpuUuid || payload.uuid || 'unknown',
+        devices,
         // include extra metadata from backend for detail view
         extra: it.extra || payload,
       };
@@ -168,6 +189,114 @@ export default function App() {
   }, [timeRange]);
 
   const auth = getAuth();
+  
+  // Build GPU Utilization datasets from system_sample events
+  const gpuUtilDatasets = useMemo(() => {
+    const nowMs = Date.now();
+    const startMs = nowMs - timeRangeMs;
+    // Collect per-device series
+    const seriesMap = new Map();
+    // Apply Program/Name filters for consistency
+    const filteredEvents = events.filter(it => (!selectedApp || it.appName === selectedApp) && (!selectedTag || (it.tag || 'default') === selectedTag));
+    for (const ev of filteredEvents) {
+      if (ev.type !== 'system_sample') continue;
+      const t = new Date(ev.timestamp).getTime();
+      if (!Number.isFinite(t)) continue;
+      // keep only points within selected window
+      if (t < startMs || t > nowMs) continue;
+      const devs = Array.isArray(ev.devices) ? ev.devices : [];
+      for (const d of devs) {
+        const key = d.uuid || d.name || 'unknown';
+        const util = typeof d.util_gpu === 'number' ? d.util_gpu : null;
+        if (util == null) continue;
+        if (!seriesMap.has(key)) {
+          seriesMap.set(key, { label: `${d.name || 'GPU'} (${d.uuid || 'unknown'})`, points: [] });
+        }
+        seriesMap.get(key).points.push({ x: t, y: util });
+      }
+    }
+    // Assign colors (basic palette)
+    const colors = ['rgb(59,130,246)','rgb(234,88,12)','rgb(16,185,129)','rgb(139,92,246)','rgb(244,63,94)','rgb(245,158,11)'];
+    let i = 0;
+    return Array.from(seriesMap.values()).map((s) => ({ ...s, color: colors[i++ % colors.length], points: s.points.sort((a,b)=>a.x-b.x) }));
+  }, [events, selectedApp, selectedTag, timeRangeMs]);
+
+  // Build Temperature (°C) datasets
+  const tempDatasets = useMemo(() => {
+    const nowMs = Date.now();
+    const startMs = nowMs - timeRangeMs;
+    const seriesMap = new Map();
+    const filteredEvents = events.filter(it => (!selectedApp || it.appName === selectedApp) && (!selectedTag || (it.tag || 'default') === selectedTag));
+    for (const ev of filteredEvents) {
+      if (ev.type !== 'system_sample') continue;
+      const t = new Date(ev.timestamp).getTime();
+      if (!Number.isFinite(t) || t < startMs || t > nowMs) continue;
+      const devs = Array.isArray(ev.devices) ? ev.devices : [];
+      for (const d of devs) {
+        const key = d.uuid || d.name || 'unknown';
+        const v = typeof d.temp_c === 'number' ? d.temp_c : null;
+        if (v == null) continue;
+        if (!seriesMap.has(key)) seriesMap.set(key, { label: `${d.name || 'GPU'} (${d.uuid || 'unknown'})`, points: [] });
+        seriesMap.get(key).points.push({ x: t, y: v });
+      }
+    }
+    const colors = ['rgb(59,130,246)','rgb(234,88,12)','rgb(16,185,129)','rgb(139,92,246)','rgb(244,63,94)','rgb(245,158,11)'];
+    let i = 0;
+    return Array.from(seriesMap.values()).map((s) => ({ ...s, color: colors[i++ % colors.length], points: s.points.sort((a,b)=>a.x-b.x) }));
+  }, [events, selectedApp, selectedTag, timeRangeMs]);
+
+  // Build Memory Utilization (%) datasets
+  const memUtilDatasets = useMemo(() => {
+    const nowMs = Date.now();
+    const startMs = nowMs - timeRangeMs;
+    const seriesMap = new Map();
+    const filteredEvents = events.filter(it => (!selectedApp || it.appName === selectedApp) && (!selectedTag || (it.tag || 'default') === selectedTag));
+    for (const ev of filteredEvents) {
+      if (ev.type !== 'system_sample') continue;
+      const t = new Date(ev.timestamp).getTime();
+      if (!Number.isFinite(t) || t < startMs || t > nowMs) continue;
+      const devs = Array.isArray(ev.devices) ? ev.devices : [];
+      for (const d of devs) {
+        const key = d.uuid || d.name || 'unknown';
+        const v = typeof d.util_mem === 'number' ? d.util_mem : null;
+        if (v == null) continue;
+        if (!seriesMap.has(key)) seriesMap.set(key, { label: `${d.name || 'GPU'} (${d.uuid || 'unknown'})`, points: [] });
+        seriesMap.get(key).points.push({ x: t, y: v });
+      }
+    }
+    const colors = ['rgb(59,130,246)','rgb(234,88,12)','rgb(16,185,129)','rgb(139,92,246)','rgb(244,63,94)','rgb(245,158,11)'];
+    let i = 0;
+    return Array.from(seriesMap.values()).map((s) => ({ ...s, color: colors[i++ % colors.length], points: s.points.sort((a,b)=>a.x-b.x) }));
+  }, [events, selectedApp, selectedTag, timeRangeMs]);
+
+  // Helper to build clock datasets by field name
+  const buildClockDatasets = useCallback((field) => {
+    const nowMs = Date.now();
+    const startMs = nowMs - timeRangeMs;
+    const seriesMap = new Map();
+    const filteredEvents = events.filter(it => (!selectedApp || it.appName === selectedApp) && (!selectedTag || (it.tag || 'default') === selectedTag));
+    for (const ev of filteredEvents) {
+      if (ev.type !== 'system_sample') continue;
+      const t = new Date(ev.timestamp).getTime();
+      if (!Number.isFinite(t) || t < startMs || t > nowMs) continue;
+      const devs = Array.isArray(ev.devices) ? ev.devices : [];
+      for (const d of devs) {
+        const key = d.uuid || d.name || 'unknown';
+        const vRaw = d?.[field];
+        const v = typeof vRaw === 'number' ? vRaw : null;
+        if (v == null) continue;
+        if (!seriesMap.has(key)) seriesMap.set(key, { label: `${d.name || 'GPU'} (${d.uuid || 'unknown'})`, points: [] });
+        seriesMap.get(key).points.push({ x: t, y: v });
+      }
+    }
+    const colors = ['rgb(59,130,246)','rgb(234,88,12)','rgb(16,185,129)','rgb(139,92,246)','rgb(244,63,94)','rgb(245,158,11)'];
+    let i = 0;
+    return Array.from(seriesMap.values()).map((s) => ({ ...s, color: colors[i++ % colors.length], points: s.points.sort((a,b)=>a.x-b.x) }));
+  }, [events, selectedApp, selectedTag, timeRangeMs]);
+
+  const clkGfxDatasets = useMemo(() => buildClockDatasets('clk_gfx'), [buildClockDatasets]);
+  const clkSmDatasets = useMemo(() => buildClockDatasets('clk_sm'), [buildClockDatasets]);
+  const clkMemDatasets = useMemo(() => buildClockDatasets('clk_mem'), [buildClockDatasets]);
   return (
     <div style={{ fontFamily: 'system-ui, sans-serif', padding: '16px', maxWidth: 1000, margin: '0 auto' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
@@ -199,23 +328,6 @@ export default function App() {
             <option value="24h">Last 24 Hours</option>
           </select>
         </label>
-        {/* Performance filters moved to top as requested */}
-        <label>
-          Program:
-          <select value={selectedApp} onChange={(e) => setSelectedApp(e.target.value)} style={{ marginLeft: 6 }}>
-            {programOptions.map((opt) => (
-              <option key={opt} value={opt}>{opt}</option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Name:
-          <select value={selectedTag} onChange={(e) => setSelectedTag(e.target.value)} style={{ marginLeft: 6 }}>
-            {nameOptions.map((opt) => (
-              <option key={opt} value={opt}>{opt}</option>
-            ))}
-          </select>
-        </label>
         {/* Auto-refresh and manual refresh removed per request */}
       </div>
 
@@ -227,24 +339,141 @@ export default function App() {
 
       <div style={{ border: '1px solid #ddd', borderRadius: 6 }}>
         <Tabs value={tab} onChange={(_, v) => setTab(v)} aria-label="Views" variant="fullWidth">
+          <Tab label="GPU Utilization" />
           <Tab label="Timeline" />
           <Tab label="Performance" />
         </Tabs>
         <div style={{ padding: 12 }}>
           {tab === 0 && (
-            <SimpleTimelineTable
-              events={events}
-              timeRangeMs={timeRangeMs}
-              onBarClick={(bar) => setDetailBar(bar)}
-            />
+            <>
+              <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 12 }}>
+                <label>
+                  Program:
+                  <select value={selectedApp} onChange={(e) => setSelectedApp(e.target.value)} style={{ marginLeft: 6 }}>
+                    {programOptions.map((opt) => (
+                      <option key={opt} value={opt}>{opt}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Name:
+                  <select value={selectedTag} onChange={(e) => setSelectedTag(e.target.value)} style={{ marginLeft: 6 }}>
+                    {nameOptions.map((opt) => (
+                      <option key={opt} value={opt}>{opt}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <div>
+                <h3 style={{ margin: '4px 0 8px' }}>GPU Utilization (%)</h3>
+                <MetricChart
+                  datasets={gpuUtilDatasets}
+                  label="GPU Utilization (%)"
+                  timeStartMs={Date.now() - timeRangeMs}
+                  timeEndMs={Date.now()}
+                />
+              </div>
+              <div>
+                <h3 style={{ margin: '16px 0 8px' }}>Memory Utilization (%)</h3>
+                <MetricChart
+                  datasets={memUtilDatasets}
+                  label="Memory Utilization (%)"
+                  timeStartMs={Date.now() - timeRangeMs}
+                  timeEndMs={Date.now()}
+                />
+              </div>
+              <div>
+                <h3 style={{ margin: '16px 0 8px' }}>Temperature (°C)</h3>
+                <MetricChart
+                  datasets={tempDatasets}
+                  label="Temperature (°C)"
+                  timeStartMs={Date.now() - timeRangeMs}
+                  timeEndMs={Date.now()}
+                />
+              </div>
+              <div>
+                <h3 style={{ margin: '16px 0 8px' }}>Clock - Graphics (MHz)</h3>
+                <MetricChart
+                  datasets={clkGfxDatasets}
+                  label="Clock - Graphics (MHz)"
+                  timeStartMs={Date.now() - timeRangeMs}
+                  timeEndMs={Date.now()}
+                />
+              </div>
+              <div>
+                <h3 style={{ margin: '16px 0 8px' }}>Clock - SM (MHz)</h3>
+                <MetricChart
+                  datasets={clkSmDatasets}
+                  label="Clock - SM (MHz)"
+                  timeStartMs={Date.now() - timeRangeMs}
+                  timeEndMs={Date.now()}
+                />
+              </div>
+              <div>
+                <h3 style={{ margin: '16px 0 8px' }}>Clock - Memory (MHz)</h3>
+                <MetricChart
+                  datasets={clkMemDatasets}
+                  label="Clock - Memory (MHz)"
+                  timeStartMs={Date.now() - timeRangeMs}
+                  timeEndMs={Date.now()}
+                />
+              </div>
+            </>
           )}
           {tab === 1 && (
-            <PerformanceTable
-              events={events}
-              timeRangeMs={timeRangeMs}
-              appFilter={selectedApp}
-              tagFilter={selectedTag}
-            />
+            <>
+              <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 12 }}>
+                <label>
+                  Program:
+                  <select value={selectedApp} onChange={(e) => setSelectedApp(e.target.value)} style={{ marginLeft: 6 }}>
+                    {programOptions.map((opt) => (
+                      <option key={opt} value={opt}>{opt}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Name:
+                  <select value={selectedTag} onChange={(e) => setSelectedTag(e.target.value)} style={{ marginLeft: 6 }}>
+                    {nameOptions.map((opt) => (
+                      <option key={opt} value={opt}>{opt}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <SimpleTimelineTable
+                events={events.filter(it => (!selectedApp || it.appName === selectedApp) && (!selectedTag || (it.tag || 'default') === selectedTag))}
+                timeRangeMs={timeRangeMs}
+                onBarClick={(bar) => setDetailBar(bar)}
+              />
+            </>
+          )}
+          {tab === 2 && (
+            <>
+              <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 12 }}>
+                <label>
+                  Program:
+                  <select value={selectedApp} onChange={(e) => setSelectedApp(e.target.value)} style={{ marginLeft: 6 }}>
+                    {programOptions.map((opt) => (
+                      <option key={opt} value={opt}>{opt}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Name:
+                  <select value={selectedTag} onChange={(e) => setSelectedTag(e.target.value)} style={{ marginLeft: 6 }}>
+                    {nameOptions.map((opt) => (
+                      <option key={opt} value={opt}>{opt}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <PerformanceTable
+                events={events}
+                timeRangeMs={timeRangeMs}
+                appFilter={selectedApp}
+                tagFilter={selectedTag}
+              />
+            </>
           )}
         </div>
       </div>

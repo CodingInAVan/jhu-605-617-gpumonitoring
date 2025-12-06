@@ -74,15 +74,8 @@ export default function SimpleTimelineTable({ events, timeRangeMs = 60 * 60 * 10
   // Determine if all tracks belong to the same application
   const uniqueApps = useMemo(() => Array.from(new Set(data.tracks.map(t => t.appName))), [data.tracks]);
 
-  if (allBars.length === 0) {
-    return (
-      <div>
-        <div style={{ fontSize: 12, color: '#666', marginBottom: 8 }}>
-          No scopes found in the selected time range.
-        </div>
-      </div>
-    );
-  }
+  // Note: even if there are no bars (only samples), we still render tracks so
+  // sample-only producers like SystemMonitor are visible in the timeline list.
 
   return (
     <div style={{ width: '100%', overflowX: 'auto' }}>
@@ -121,9 +114,10 @@ export default function SimpleTimelineTable({ events, timeRangeMs = 60 * 60 * 10
           {data.tracks.map((track) => {
             // Hide repeating app name and PID; show concise tag label only
             const label = track.tag || 'default';
-            // Only show tracks that have at least one overlapping bar
+            // Show tracks that have at least one overlapping bar OR any samples in range
             const tbars = track.bars.filter((b) => b.endMs >= timeStart && b.startMs <= timeEnd);
-            if (tbars.length === 0) return null;
+            const tsamples = track.samples.filter((s) => s.t >= timeStart && s.t <= timeEnd);
+            if (tbars.length === 0 && tsamples.length === 0) return null;
             return (
               <>
                 <tr key={track.key}>
@@ -145,7 +139,13 @@ export default function SimpleTimelineTable({ events, timeRangeMs = 60 * 60 * 10
                         const leftPct = ((s - displayStart) / rangeMs) * 100;
                         const widthPct = Math.max(0.2, ((e - s) / rangeMs) * 100); // ensure visible
                         const cudaLabel = b.type === 'kernel' ? ' [CUDA]' : '';
-                        const title = `${b.name}${cudaLabel}\n${formatDateTimeMs(b.startMs)} – ${formatDateTimeMs(b.endMs)}`;
+                        let devicesInfo = '';
+                        if (Array.isArray((b as any).source?.devices) && (b as any).source.devices.length > 0) {
+                          const devs = (b as any).source.devices as any[];
+                          const names = devs.map((d) => `${d.name || 'GPU'} (${d.uuid || 'unknown'})`).join('; ');
+                          devicesInfo = `\nDevices: ${names}`;
+                        }
+                        const title = `${b.name}${cudaLabel}\n${formatDateTimeMs(b.startMs)} – ${formatDateTimeMs(b.endMs)}${devicesInfo}`;
                         const color = b.type === 'kernel' ? '#d97706' : '#3b82f6';
                         return (
                           <div
@@ -167,6 +167,11 @@ export default function SimpleTimelineTable({ events, timeRangeMs = 60 * 60 * 10
                           />
                         );
                       })}
+                      {tbars.length === 0 && tsamples.length > 0 && (
+                        <div style={{ position: 'absolute', left: 0, right: 0, top: (rowHeight - barHeight) / 2, height: barHeight, display: 'flex', alignItems: 'center', color: '#666', fontSize: 11 }}>
+                          <span style={{ opacity: 0.8 }}>samples only</span>
+                        </div>
+                      )}
                     </div>
                   </td>
                 </tr>
