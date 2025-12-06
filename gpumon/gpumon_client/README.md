@@ -245,7 +245,6 @@ int main() {
 
 The library is header-only. Target name is `gpumon::gpumon`.
 
-### Option A: add_subdirectory
 
 ```cmake
 add_subdirectory(path/to/gpumon/gpumon_client)
@@ -257,28 +256,6 @@ set_target_properties(my_app PROPERTIES
   CUDA_STANDARD 17)
 ```
 
-### Option B: FetchContent
-
-```cmake
-include(FetchContent)
-FetchContent_Declare(
-  gpumon_client
-  GIT_REPOSITORY https://github.com/your-org/gpumon.git
-  GIT_TAG        main
-  SOURCE_SUBDIR  gpumon_client)
-FetchContent_MakeAvailable(gpumon_client)
-
-add_executable(my_app main.cu)
-target_link_libraries(my_app PRIVATE gpumon::gpumon)
-```
-
-### Option C: Installed package
-
-```cmake
-find_package(gpumon_client 0.1 REQUIRED)
-add_executable(my_app main.cu)
-target_link_libraries(my_app PRIVATE gpumon::gpumon)
-```
 
 Install from this directory:
 
@@ -323,7 +300,3 @@ Roadmap items include async timing via CUDA events and non-blocking instrumentat
 
 - Link/undefined references
   - This is header-only; usually indicates the file isn’t compiled as CUDA (`.cu`) when needed. Enable `CUDA_SEPARABLE_COMPILATION` or place CUDA code in `.cu` sources
-
-## License
-
-Part of the GPUmon project.
