@@ -5,10 +5,21 @@
 #include <vector>
 #include "../core/common.hpp"
 
+#ifdef GPUMON_ENABLE_NVML
+    #include <nvml.h>
+#endif
 namespace gpumon {
     namespace backend {
-        inline void initialize() {}
-        inline void shutdown() {}
+        inline void initialize() {
+            #ifdef GPUMON_ENABLE_NVML
+                nvmlInit(); // Initialize NVML if enabled
+            #endif
+        }
+        inline void shutdown() {
+            #ifdef GPUMON_ENABLE_NVML
+                nvmlShutdown();
+            #endif
+        }
         inline void synchronize() { cudaDeviceSynchronize(); }
 
         inline std::string formatUuid(const char* bytes) {
@@ -56,36 +67,93 @@ namespace gpumon {
         inline std::vector<detail::DeviceSnapshot> get_device_snapshots() {
             std::vector<detail::DeviceSnapshot> snapshots;
 
-            int deviceCount = 0;
-            if (cudaError_t err = cudaGetDeviceCount(&deviceCount); err != cudaSuccess || deviceCount == 0) return snapshots;
+#ifdef GPUMON_ENABLE_NVML
+            {
+                unsigned int deviceCount = 0;
+                if (nvmlDeviceGetCount(&deviceCount) != NVML_SUCCESS || deviceCount == 0) return snapshots;
 
-            // Save current device to restore later (polite behavior)
-            int currentDevice = -1;
-            cudaGetDevice(&currentDevice);
+                for (unsigned int i = 0; i < deviceCount; ++i) {
+                    nvmlDevice_t nvDev;
+                    if (nvmlDeviceGetHandleByIndex(i, &nvDev) != NVML_SUCCESS) continue;
 
-            for (int i = 0; i < deviceCount; ++i) {
-                cudaSetDevice(i);
-
-                // 1. Get Dynamic Data (Memory)
-                size_t free = 0, total = 0;
-                if (cudaMemGetInfo(&free, &total) == cudaSuccess) {
                     detail::DeviceSnapshot snap;
-                    snap.deviceId = i;
-                    snap.freeMiB = free / (1024 * 1024);
-                    snap.totalMiB = total / (1024 * 1024);
-                    snap.usedMiB = snap.totalMiB - snap.freeMiB;
+                    snap.deviceId = static_cast<int>(i);
 
-                    // 2. Get Static Data (From Cache)
-                    auto staticInfo = get_cached_static_info(i);
-                    snap.name = staticInfo.name;
-                    snap.uuid = staticInfo.uuid;
-                    snap.pciBusId = staticInfo.pciBusId;
+                    // 1. Identity (From NVML directly)
+                    char name[NVML_DEVICE_NAME_BUFFER_SIZE];
+                    char uuid[NVML_DEVICE_UUID_BUFFER_SIZE];
+                    nvmlPciInfo_t pci;
+
+                    if (nvmlDeviceGetName(nvDev, name, sizeof(name)) == NVML_SUCCESS) snap.name = name;
+                    if (nvmlDeviceGetUUID(nvDev, uuid, sizeof(uuid)) == NVML_SUCCESS) snap.uuid = uuid;
+                    if (nvmlDeviceGetPciInfo(nvDev, &pci) == NVML_SUCCESS) snap.pciBusId = pci.bus;
+
+                    // 2. Memory (Physical state, no context overhead)
+                    nvmlMemory_t mem;
+                    if (nvmlDeviceGetMemoryInfo(nvDev, &mem) == NVML_SUCCESS) {
+                        snap.totalMiB = mem.total / (1024 * 1024);
+                        snap.freeMiB  = mem.free  / (1024 * 1024);
+                        snap.usedMiB  = mem.used  / (1024 * 1024);
+                    }
+
+                    // 3. Extended Telemetry
+                    nvmlUtilization_t util;
+                    if (nvmlDeviceGetUtilizationRates(nvDev, &util) == NVML_SUCCESS) {
+                        snap.gpuUtil = util.gpu;
+                        snap.memUtil = util.memory;
+                    }
+                    unsigned int val = 0;
+                    if (nvmlDeviceGetTemperature(nvDev, NVML_TEMPERATURE_GPU, &val) == NVML_SUCCESS) snap.tempC = val;
+                    if (nvmlDeviceGetPowerUsage(nvDev, &val) == NVML_SUCCESS) snap.powermW = val;
+                    if (nvmlDeviceGetClockInfo(nvDev, NVML_CLOCK_GRAPHICS, &val) == NVML_SUCCESS) snap.clockGfx = val;
+                    if (nvmlDeviceGetClockInfo(nvDev, NVML_CLOCK_SM, &val) == NVML_SUCCESS)       snap.clockSm = val;
+                    if (nvmlDeviceGetClockInfo(nvDev, NVML_CLOCK_MEM, &val) == NVML_SUCCESS)      snap.clockMem = val;
 
                     snapshots.push_back(snap);
                 }
+                return snapshots;
             }
-            if (currentDevice >= 0) cudaSetDevice(currentDevice);
-            return snapshots;
+#else
+            {
+                int deviceCount = 0;
+                if (cudaError_t err = cudaGetDeviceCount(&deviceCount); err != cudaSuccess || deviceCount == 0) return snapshots;
+
+                // Save current device to restore later (polite behavior)
+                int currentDevice = -1;
+                cudaGetDevice(&currentDevice);
+
+                for (int i = 0; i < deviceCount; ++i) {
+                    cudaSetDevice(i);
+
+                    // 1. Get Dynamic Data (Memory)
+                    size_t free = 0, total = 0;
+                    if (cudaMemGetInfo(&free, &total) == cudaSuccess) {
+                        cudaSetDevice(i); // This creates/activates context
+
+                        detail::DeviceSnapshot snap;
+                        snap.deviceId = i;
+
+                        // Identity (Cached via CUDA Props)
+                        auto staticInfo = get_cached_static_info(i);
+                        snap.name = staticInfo.name;
+                        snap.uuid = staticInfo.uuid;
+                        snap.pciBusId = staticInfo.pciBusId;
+
+                        // Memory (Context-aware)
+                        size_t free = 0, total = 0;
+                        if (cudaMemGetInfo(&free, &total) == cudaSuccess) {
+                            snap.freeMiB = free / (1024 * 1024);
+                            snap.totalMiB = total / (1024 * 1024);
+                            snap.usedMiB = snap.totalMiB - snap.freeMiB;
+                        }
+
+                        snapshots.push_back(snap);
+                    }
+                }
+                if (currentDevice >= 0) cudaSetDevice(currentDevice);
+                return snapshots;
+            }
+#endif
         }
 
         // Get info for the CURRENTLY active device (for Kernel Launch)

@@ -1,16 +1,34 @@
 // Shared TypeScript types for gpumon frontend
 
+export interface MetricDevice {
+  id?: number | null;
+  uuid?: string | null;
+  name?: string | null; // gpuName
+  pci_bus?: number | null;
+  used_mib?: number | null;
+  free_mib?: number | null;
+  total_mib?: number | null;
+  util_gpu?: number | null; // percent
+  util_mem?: number | null; // percent
+  temp_c?: number | null;   // Celsius
+  power_mw?: number | null; // milliwatts
+  clk_gfx?: number | null;  // MHz
+  clk_sm?: number | null;   // MHz
+  clk_mem?: number | null;  // MHz
+}
+
 export interface MetricEvent {
   timestamp: string; // ISO string (end time for scope_end)
-  type: 'process_sample' | 'scope_begin' | 'scope_end' | 'kernel';
+  type: 'process_sample' | 'system_sample' | 'scope_sample' | 'scope_begin' | 'scope_end' | 'kernel';
   pid: number;
   appName: string; // e.g. "heavy_cuda_demo"
   tag?: string; // e.g. "training_loop" or thread name
   name?: string; // Scope name or Kernel name
 
   // For Samples
-  usedMemoryMiB?: number;
-  tempC?: number;
+  usedMemoryMiB?: number; // derived from devices[].used_mib when available
+  tempC?: number; // legacy aggregate; prefer per-device temp_c
+  devices?: MetricDevice[]; // one or more devices assigned to this event
 
   // For Scopes/Kernels
   durationNs?: number;

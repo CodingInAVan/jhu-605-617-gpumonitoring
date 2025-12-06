@@ -43,4 +43,26 @@ class MetricDeviceEntity(
 
     @Column(name = "total_mib")
     var totalMiB: Int? = null,
+
+    // New telemetry fields (nullable; may not be present on all events)
+    @Column(name = "util_gpu")
+    var utilGpu: Int? = null, // percent
+
+    @Column(name = "util_mem")
+    var utilMem: Int? = null, // percent
+
+    @Column(name = "temp_c")
+    var tempC: Int? = null, // Celsius
+
+    @Column(name = "power_mw")
+    var powerMw: Int? = null, // milliwatts
+
+    @Column(name = "clk_gfx")
+    var clkGfx: Int? = null, // MHz
+
+    @Column(name = "clk_sm")
+    var clkSm: Int? = null, // MHz
+
+    @Column(name = "clk_mem")
+    var clkMem: Int? = null, // MHz
 )

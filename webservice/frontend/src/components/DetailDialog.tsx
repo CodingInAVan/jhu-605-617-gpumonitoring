@@ -48,6 +48,7 @@ export default function DetailDialog({ open, bar, onClose }: DetailDialogProps) 
   const ev: any = bar?.source || {};
   const extra = (ev && (ev.extra || {})) as any;
   const isKernel = bar?.type === 'kernel';
+  const devices: any[] = Array.isArray(ev?.devices) ? ev.devices : [];
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth>
@@ -79,6 +80,36 @@ export default function DetailDialog({ open, bar, onClose }: DetailDialogProps) 
                 <TableCell>GPU</TableCell>
                 <TableCell>{ev?.gpuName || 'GPU'} ({ev?.uuid || 'unknown'})</TableCell>
               </TableRow>
+              {devices.length > 0 && (
+                <TableRow>
+                  <TableCell>Devices</TableCell>
+                  <TableCell>
+                    <Table size="small">
+                      <TableBody>
+                        {devices.map((d, i) => (
+                          <TableRow key={i}>
+                            <TableCell colSpan={2}>
+                              <div style={{ marginBottom: 6, fontWeight: 600 }}>{d.name || 'GPU'} ({d.uuid || 'unknown'})</div>
+                              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(120px, 1fr))', gap: 8, fontSize: 12 }}>
+                                <div>used_mib: {d.used_mib ?? '-'}</div>
+                                <div>free_mib: {d.free_mib ?? '-'}</div>
+                                <div>total_mib: {d.total_mib ?? '-'}</div>
+                                <div>util_gpu: {d.util_gpu ?? '-'}</div>
+                                <div>util_mem: {d.util_mem ?? '-'}</div>
+                                <div>temp_c: {d.temp_c ?? '-'}</div>
+                                <div>power_mw: {d.power_mw ?? '-'}</div>
+                                <div>clk_gfx: {d.clk_gfx ?? '-'}</div>
+                                <div>clk_sm: {d.clk_sm ?? '-'}</div>
+                                <div>clk_mem: {d.clk_mem ?? '-'}</div>
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </TableCell>
+                </TableRow>
+              )}
               <TableRow>
                 <TableCell>Start</TableCell>
                 <TableCell>{formatTimeMs(bar.startMs)}</TableCell>
