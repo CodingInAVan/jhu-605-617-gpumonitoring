@@ -3,6 +3,11 @@ EN.605.617 – Introduction to GPU Programming – Final Project.
 
 ![img.png](img.png)
 ![img_1.png](img_1.png)
+
+![img2.png](img2.png)
+![img2_1.png](img2_1.png)
+
+![img3.png](img3.png)
 ## How to run
 This repository has three parts that work together:
 - backend (Kotlin + Spring Boot + SQLite) – receives and serves GPU metrics
@@ -94,6 +99,6 @@ Notes:
 ```
 cd webservice\frontend
 npm run build
-npm run preview
+npm run dev
 ```
 This serves the static build on port 5173 for a quick preview. In a real deployment you would serve `webservice/frontend/dist` with a static server or behind your backend/reverse proxy.

@@ -13,14 +13,14 @@ This guide explains how to integrate the GPUmon client library into your CUDA ap
 │  - Writes NDJSON to log files           │
 └────────────┬────────────────────────────┘
              │ Writes to
-             │ $GPUMON_LOG_DIR/gpumon_{appName}_{pid}.log
+             │ $GPUMON_LOG_DIR/gpumon_{appName}.log
              ▼
 ┌─────────────────────────────────────────┐
 │  Log Directory                           │
 │  (configured in crawler config)         │
 │                                          │
-│  - gpumon_training_app_1234.log         │
-│  - gpumon_inference_app_5678.log        │
+│  - gpumon_training_app.log         │
+│  - gpumon_inference_app.log        │
 └────────────┬────────────────────────────┘
              │ Reads from
              │ (scans for gpumon_*.log)
@@ -81,7 +81,7 @@ int main() {
     // Initialize with app name only - log path auto-determined from GPUMON_LOG_DIR
     gpumon::InitOptions opts;
     opts.appName = "my_training_app";
-    opts.logFilePath = "";  // Empty = use GPUMON_LOG_DIR/{appName}_{pid}.log
+    opts.logFilePath = "";  // Empty = use GPUMON_LOG_DIR/{appName}.log
 
     if (!gpumon::init(opts)) {
         std::cerr << "Failed to initialize gpumon" << std::endl;
